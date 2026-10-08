@@ -635,18 +635,23 @@ function trackedByChannel(channelId: string): Tracked | undefined {
 
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
+/** Save one attachment to the inbox; undefined if it's over 25 MB or the download fails. */
+async function downloadAttachment(att: import('discord.js').Attachment): Promise<string | undefined> {
+  if (att.size > 25 * 1024 * 1024) return undefined
+  const res = await fetch(att.url).catch(() => undefined)
+  if (!res?.ok) return undefined
+  mkdirSync(INBOX_DIR, { recursive: true })
+  const ext = (att.name.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1] ?? 'bin').toLowerCase()
+  const p = join(INBOX_DIR, `${Date.now()}-${att.id}.${ext}`)
+  writeFileSync(p, Buffer.from(await res.arrayBuffer()))
+  return p
+}
+
 async function downloadAttachments(msg: Message): Promise<string[]> {
   const paths: string[] = []
-  if (!msg.attachments.size) return paths
-  mkdirSync(INBOX_DIR, { recursive: true })
   for (const att of msg.attachments.values()) {
-    if (att.size > 25 * 1024 * 1024) continue
-    const res = await fetch(att.url)
-    if (!res.ok) continue
-    const ext = (att.name.match(/\.([a-zA-Z0-9]{1,10})$/)?.[1] ?? 'bin').toLowerCase()
-    const p = join(INBOX_DIR, `${Date.now()}-${att.id}.${ext}`)
-    writeFileSync(p, Buffer.from(await res.arrayBuffer()))
-    paths.push(p)
+    const p = await downloadAttachment(att)
+    if (p) paths.push(p)
   }
   return paths
 }
@@ -1820,13 +1825,18 @@ async function endMeeting(t: Tracked, msg: Message, peer: Socket) {
   const botMention = new RegExp(`<@!?${client.user!.id}>`, 'g')
   const people = [...new Map(msgs.map(x => [x.author.id, x.author])).values()]
   const time = (d: Date) => d.toISOString().slice(11, 16)
+  // Attachments are saved locally like a normal message's, so Claude can open them.
+  const saved = new Map<string, string | undefined>()
+  for (const x of msgs) for (const a of x.attachments.values()) saved.set(a.id, await downloadAttachment(a))
   const notes = [
     `# Discussion in #${ch.name}`,
     `Participants: ${people.map(u => `${u.username} (${roleTag(u.id, t.st)})`).join(', ')}`,
     `${new Date(meeting.startedAt).toISOString()} – ${msg.createdAt.toISOString()} (UTC)`,
     '',
     ...msgs.map(x => {
-      const files = [...x.attachments.values()].map(a => `\n  [attachment: ${a.name} ${a.url}]`).join('')
+      const files = [...x.attachments.values()]
+        .map(a => `\n  [attachment: ${a.name} ${saved.get(a.id) ? `saved at ${saved.get(a.id)}` : `(not downloaded: over 25 MB or failed) ${a.url}`}]`)
+        .join('')
       // Drop the bot's tag before mentions are turned into @names.
       const text = cleanContent(x.content.replace(botMention, ''), ch)
       return `**${x.author.username}** (${roleTag(x.author.id, t.st)}) ${time(x.createdAt)}: ${text.trim()}${files}`
@@ -1845,7 +1855,7 @@ async function endMeeting(t: Tracked, msg: Message, peer: Socket) {
       ...(isOwner(msg.author.id) ? {} : { role: roleTag(msg.author.id, t.st) }),
       ts: msg.createdAt.toISOString(),
       meeting: `${msgs.length} messages from ${people.map(u => u.username).join(', ')}`,
-      attachments: file,
+      attachments: [file, ...[...saved.values()].filter((p): p is string => !!p)].join('; '),
     },
   })
   t.st.meeting = undefined
