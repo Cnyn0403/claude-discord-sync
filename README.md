@@ -121,6 +121,7 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/unshare @user` | session channel | Remove their access |
 | `/members` | session channel | List who can access this session |
 | `/sync off` / `/sync on` | session channel, or anywhere for every session | Pause / resume mirroring (see [Pausing](#pausing)) |
+| `/mode <mode>` | session channel | Switch the permission mode (default, accept edits, plan, auto, bypass permissions) by pressing Shift+Tab until the session's footer shows it. Needs a session in tmux (anything started with `/new`) or a Windows console window |
 | `/model <name>` | session channel | Switch the model (`opus`, `sonnet`, `haiku`, `fable`, `default` or a model ID). Types `/model` into the session, so Claude must be idle. Like typing it locally, it also becomes your default for new sessions |
 | `yes abcde` / `no abcde` | session channel | Answer a permission prompt by its code |
 

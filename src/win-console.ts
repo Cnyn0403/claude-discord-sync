@@ -47,7 +47,7 @@ function attach(pid: number) {
 }
 
 /** One INPUT_RECORD (20 bytes) holding a KEY_EVENT_RECORD. */
-function keyRecord(down: boolean, vk: number, char: number): Buffer {
+function keyRecord(down: boolean, vk: number, char: number, controlState = 0): Buffer {
   const b = Buffer.alloc(20)
   b.writeUInt16LE(KEY_EVENT, 0)
   b.writeInt32LE(down ? 1 : 0, 4) // bKeyDown
@@ -55,17 +55,18 @@ function keyRecord(down: boolean, vk: number, char: number): Buffer {
   b.writeUInt16LE(vk, 10) // wVirtualKeyCode
   b.writeUInt16LE(0, 12) // wVirtualScanCode
   b.writeUInt16LE(char, 14) // uChar.UnicodeChar
-  b.writeUInt32LE(0, 16) // dwControlKeyState
+  b.writeUInt32LE(controlState, 16) // dwControlKeyState
   return b
 }
 
 function records(keys: Key[]): Buffer {
   const out: Buffer[] = []
-  const press = (vk: number, char: number) => out.push(keyRecord(true, vk, char), keyRecord(false, vk, char))
+  const press = (vk: number, char: number, state = 0) => out.push(keyRecord(true, vk, char, state), keyRecord(false, vk, char, state))
   for (const k of keys) {
     if (k === 'Escape') press(0x1b, 0x1b)
     else if (k === 'Enter') press(0x0d, 0x0d)
     else if (k === 'Down') press(0x28, 0)
+    else if (k === 'BackTab') press(0x09, 0x09, 0x0010) // SHIFT_PRESSED
     else for (const ch of k.text) press(0, ch.charCodeAt(0))
   }
   return Buffer.concat(out)

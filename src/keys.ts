@@ -6,15 +6,16 @@ import { openSync, closeSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { IS_LINUX, IS_MAC } from './platform'
 
-export type Key = 'Escape' | 'Enter' | 'Down' | { text: string }
+/** BackTab is Shift+Tab, which cycles Claude Code's permission mode. */
+export type Key = 'Escape' | 'Enter' | 'Down' | 'BackTab' | { text: string }
 
 export function keysToTty(keys: Key[]): string {
-  return keys.map(k => (k === 'Escape' ? '\x1b' : k === 'Enter' ? '\r' : k === 'Down' ? '\x1b[B' : k.text)).join('')
+  return keys.map(k => (k === 'Escape' ? '\x1b' : k === 'Enter' ? '\r' : k === 'Down' ? '\x1b[B' : k === 'BackTab' ? '\x1b[Z' : k.text)).join('')
 }
 
 /** Argument lists for `tmux send-keys`, one invocation each. */
 export function keysToTmux(keys: Key[]): string[][] {
-  return keys.map(k => (typeof k === 'string' ? [k] : ['-l', k.text]))
+  return keys.map(k => (k === 'BackTab' ? ['BTab'] : typeof k === 'string' ? [k] : ['-l', k.text]))
 }
 
 /**

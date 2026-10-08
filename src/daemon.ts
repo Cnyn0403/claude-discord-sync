@@ -658,7 +658,7 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|migrate|sync|model)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|migrate|sync|model|mode)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
     if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' ? 'chat' : 'owner')) {
@@ -669,6 +669,12 @@ client.on('messageCreate', async (msg: Message) => {
       const on = (cmd[2] ?? '').trim().toLowerCase()
       if (on !== 'on' && on !== 'off') return void (await msg.reply(m.syncUsage))
       await setSync(messageReplier(msg), msg.channelId, on === 'on', msg.author.username)
+      return
+    }
+    if (name === 'mode') {
+      const mode = (cmd[2] ?? '').trim()
+      if (!isMode(mode)) return void (await msg.reply(m.modeUsage))
+      await setMode(messageReplier(msg), msg.channelId, mode)
       return
     }
     if (name === 'model') {
@@ -1464,6 +1470,11 @@ const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('sync'), 'sync').addStringOption(o =>
     described(o.setName('state'), 'syncState').setRequired(true).addChoices(choice('off', 'syncOff'), choice('on', 'syncOn')),
   ),
+  described(new SlashCommandBuilder().setName('mode'), 'mode').addStringOption(o =>
+    described(o.setName('mode'), 'modeName')
+      .setRequired(true)
+      .addChoices(...MODES.map(v => ({ name: MODE_LABELS[v], value: v }))),
+  ),
   described(new SlashCommandBuilder().setName('model'), 'model').addStringOption(o =>
     described(o.setName('name'), 'modelName').setRequired(true).setAutocomplete(true),
   ),
@@ -1932,7 +1943,7 @@ async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
@@ -1949,10 +1960,70 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
   await i.deferReply()
   const r = interactionReplier(i)
   if (i.commandName === 'sync') return setSync(r, i.channelId, i.options.getString('state') === 'on', i.user.username)
+  if (i.commandName === 'mode') return setMode(r, i.channelId, i.options.getString('mode', true) as Mode)
   if (i.commandName === 'model') return setModel(r, i.channelId, i.options.getString('name', true).trim())
   const user = i.options.getUser('user', true)
   if (user.bot) return void (await r.reply(m.cantShareWithBot))
   await share(r, i.channelId, user.id, i.commandName === 'share' ? (i.options.getString('role', true) as Role) : undefined)
+}
+
+// ---- /mode ---------------------------------------------------------------------
+
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
+type Mode = (typeof MODES)[number]
+const isMode = (s: string): s is Mode => (MODES as readonly string[]).includes(s)
+const MODE_LABELS: Record<Mode, string> = {
+  default: 'default',
+  acceptEdits: 'accept edits',
+  plan: 'plan',
+  auto: 'auto',
+  bypassPermissions: 'bypass permissions',
+}
+
+/**
+ * The mode shown in Claude Code's footer ("⏵⏵ auto mode on (shift+tab to cycle)").
+ * The transcript only records a mode change with the next message, so the
+ * screen is the only place to read it right after Shift+Tab.
+ */
+function modeOnScreen(screen: string): Mode {
+  const footer = screen.split('\n').filter(l => l.trim()).slice(-4).join('\n').toLowerCase()
+  if (footer.includes('bypass permissions on')) return 'bypassPermissions'
+  if (footer.includes('accept edits on')) return 'acceptEdits'
+  if (footer.includes('plan mode on')) return 'plan'
+  if (footer.includes('auto mode on')) return 'auto'
+  return 'default'
+}
+
+/** The session's screen: from tmux, or its console on Windows. Undefined for a plain terminal. */
+async function screenOf(pid: number): Promise<string | undefined> {
+  const tmux = tmuxPaneOf(pid)
+  if (tmux) return (await run('tmux', ['-S', tmux.socket, 'capture-pane', '-p', '-t', tmux.pane]).catch(() => undefined))?.stdout
+  if (IS_WIN) return (await winConsole('screen', pid)).text
+  return undefined
+}
+
+/** Press Shift+Tab until the footer shows `target`, giving up after a full cycle. */
+async function setMode(r: Replier, channelId: string, target: Mode) {
+  const t = trackedByChannel(channelId)
+  if (!t?.live) return void (await r.reply(t || endedByChannel(channelId) ? m.alreadyEnded : m.notSessionChannel))
+  const pid = t.live.pid
+  const peer = peers.get(pid)
+  let screen = await screenOf(pid)
+  if (screen === undefined) return void (await r.reply(m.modeNeedsScreen))
+  const start = modeOnScreen(screen)
+  if (start === target) return void (await r.reply(m.modeAlready(MODE_LABELS[target])))
+  // default → accept edits → plan → auto / bypass (when enabled) → default: at most 5 steps.
+  for (let i = 0; i < 6; i++) {
+    const { error } = await typeInto(pid, peer, ['BackTab'])
+    if (error) return void (await r.reply(m.cantType(error)))
+    await Bun.sleep(500)
+    screen = await screenOf(pid)
+    if (screen === undefined) break
+    const now = modeOnScreen(screen)
+    if (now === target) return void (await r.reply(m.modeSet(MODE_LABELS[target])))
+    if (now === start) return void (await r.reply(m.modeUnavailable(MODE_LABELS[target], MODE_LABELS[start])))
+  }
+  await r.reply(m.modeUnknown(MODE_LABELS[target]))
 }
 
 // ---- /model --------------------------------------------------------------------
