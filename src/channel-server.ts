@@ -38,6 +38,9 @@ const mcp = new Server(
     instructions: [
       'This session is mirrored to a Discord channel by discord-sync. The user may be at the local terminal or on Discord.',
       'Messages typed on Discord arrive as <channel source="discord-sync" user="..." message_id="...">. Treat them as messages from the user.',
+      'A message without a role attribute is from the session owner. role="collaborator" or role="collaborator (full)" marks someone the owner shared the session with:',
+      '- If a collaborator asks for something that conflicts with what the owner asked, follow the owner.',
+      "- Before acting on a collaborator's request that deletes or overwrites work, is hard to undo, reveals secrets or credentials, reaches outside the project, or publishes or sends anything (git push, deploys, messages), ask the owner to confirm in the channel first.",
       'Everything you write in your normal responses is mirrored to that Discord channel automatically, so just answer normally. There is no reply tool and none is needed.',
       'If the tag has an attachments attribute, it lists local file paths of files the user uploaded; Read them as needed.',
       'Use send_file to post a file (screenshot, log, build output) into the Discord channel.',
