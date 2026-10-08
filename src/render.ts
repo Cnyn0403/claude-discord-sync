@@ -4,7 +4,8 @@
  * unknown record shapes are skipped rather than rendered half-broken.
  */
 
-export type Block = { kind: 'user' | 'assistant' | 'tool' | 'question' | 'info'; text: string }
+/** `plain` is the unformatted text of a user message, used to label sessions. */
+export type Block = { kind: 'user' | 'assistant' | 'tool' | 'question' | 'info'; text: string; plain?: string }
 
 export type RenderContext = {
   /** tool_use_id -> tool name, so tool_result records can be attributed. */
@@ -50,7 +51,7 @@ function renderUserText(raw: string): Block | undefined {
   if (bash) return { kind: 'info', text: `-# 💻 ${code('! ' + bash[1])}` }
   const text = stripNoise(raw)
   if (!text) return undefined
-  return { kind: 'user', text: `👤 **本地輸入**\n${quote(text)}` }
+  return { kind: 'user', text: `👤 **本地輸入**\n${quote(text)}`, plain: text }
 }
 
 function summarizeTool(name: string, input: any, ctx: RenderContext): Block | undefined {

@@ -21,20 +21,24 @@ import {
   PermissionFlagsBits,
   type Guild,
   type TextChannel,
+  type ForumChannel,
+  type AnyThreadChannel,
   type Message,
   type Interaction,
   type ButtonInteraction,
   type StringSelectMenuInteraction,
   type ModalSubmitInteraction,
   type MessageActionRowComponentBuilder,
+  type RepliableInteraction,
   AttachmentBuilder,
+  SlashCommandBuilder,
 } from 'discord.js'
 import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { homedir } from 'os'
-import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync } from 'fs'
-import { basename, join, resolve } from 'path'
+import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync } from 'fs'
+import { basename, dirname, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
@@ -52,8 +56,22 @@ type SessionState = {
   transcript?: string
   title?: string
   ended?: boolean
+  /** When the session ended (ms); drives the resume list order and old-channel cleanup. */
+  endedAt?: number
+  /** The user's latest message (local or Discord), to tell sessions apart in the console. */
+  lastPrompt?: string
+  /** Forum post this session was archived to (reused if it ends again after a resume). */
+  archiveThreadId?: string
 }
-type State = { guildId?: string; categoryId?: string; archiveCategoryId?: string; sessions: Record<string, SessionState> }
+type State = {
+  guildId?: string
+  categoryId?: string
+  archiveCategoryId?: string
+  archiveForumId?: string
+  consoleChannelId?: string
+  consoleMessageId?: string
+  sessions: Record<string, SessionState>
+}
 
 function log(...args: unknown[]) {
   console.error(new Date().toISOString(), ...args)
@@ -185,6 +203,7 @@ async function startTracking(s: LiveSession) {
     if (prev!.ended) {
       if (ch.parentId !== state.categoryId) await ch.setParent(state.categoryId!, { lockPermissions: false }).catch(() => {})
       prev!.ended = false
+      prev!.endedAt = undefined
       await post(t, [`🟢 **Session 恢復** · PID ${s.pid}`])
     }
   } else {
@@ -196,6 +215,9 @@ async function startTracking(s: LiveSession) {
     })
     t.st.channelId = ch.id
     t.st.offset = 0
+    // Resumed after its channel was archived to the forum or deleted.
+    t.st.ended = false
+    t.st.endedAt = undefined
     await post(t, [headerFor(t)])
     if (transcript) {
       // Session predates the channel: show only the tail of its history.
@@ -205,6 +227,7 @@ async function startTracking(s: LiveSession) {
         t.st.title = titleOf(o) ?? t.st.title
         blocks.push(...renderRecord(o, t.ctx))
       }
+      noteLastPrompt(t, blocks)
       const shown = blocks.slice(-cfg.backlog)
       if (blocks.length > shown.length) await post(t, [`-# …（略過較早的 ${blocks.length - shown.length} 則）`])
       await post(t, pack(shown, cfg.attachOver))
@@ -226,13 +249,209 @@ async function endTracking(t: Tracked) {
   pump(t)
   await post(t, ['🔴 **Session 已結束**'])
   t.st.ended = true
+  t.st.endedAt = Date.now()
   stateDirty = true
   tracked.delete(t.sessionId)
-  if (state.archiveCategoryId) {
-    const ch = await channelOf(t)
-    await ch?.setParent(state.archiveCategoryId, { lockPermissions: false }).catch(e => log('archive failed:', e?.message))
+  if (forumAvailable()) {
+    try {
+      await archiveToForum(t)
+      return
+    } catch (e: any) {
+      log('forum archive failed, moving the channel to the archive category instead:', e?.message ?? e)
+    }
+  }
+  await archiveToCategory(t)
+}
+
+/** Without a forum (disabled or not available in this guild): move the channel to the archive category. */
+async function archiveToCategory(t: Tracked) {
+  if (!cfg.archiveCategoryName) return
+  state.archiveCategoryId = await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId)
+  stateDirty = true
+  const ch = await channelOf(t)
+  await ch?.setParent(state.archiveCategoryId, { lockPermissions: false }).catch(e => log('archive failed:', e?.message))
+}
+
+// ---- forum archive ------------------------------------------------------------
+
+/** When this guild last refused to create the forum; we retry after an hour (e.g. once Community is enabled). */
+let forumFailedAt = 0
+const forumAvailable = () => !!cfg.archiveForumName && Date.now() - forumFailedAt > 3_600_000
+
+async function archiveForum(): Promise<ForumChannel> {
+  const cached = state.archiveForumId ? guild.channels.cache.get(state.archiveForumId) : undefined
+  if (cached?.type === ChannelType.GuildForum) return cached
+  const found = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && c.name === cfg.archiveForumName) as ForumChannel | undefined
+  const forum =
+    found ??
+    (await guild.channels
+      .create({
+        name: cfg.archiveForumName,
+        type: ChannelType.GuildForum,
+        parent: state.categoryId,
+        topic: '已結束的 Claude Code session。按貼文裡的「▶️ 恢復」或輸入 /resume 可以接著做；刪掉貼文就會從清單移除。',
+      })
+      .catch(e => {
+        forumFailedAt = Date.now()
+        throw new Error(`cannot create forum channel: ${e?.message ?? e}`)
+      }))
+  state.archiveForumId = forum.id
+  stateDirty = true
+  return forum
+}
+
+/** The whole conversation as Markdown, for the archive post. */
+function conversationMarkdown(st: SessionState): string | undefined {
+  if (!st.transcript) return undefined
+  const ctx: RenderContext = { toolNames: new Map(), showToolCalls: true }
+  const blocks = new JsonlTail(st.transcript).read().flatMap(o => renderRecord(o, ctx))
+  const md = blocks.map(b => b.text).join('\n\n')
+  // Discord's default upload limit is 10 MB; keep the most recent part.
+  return md.length > 9_000_000 ? '…（較早的內容已省略）\n\n' + md.slice(-9_000_000) : md
+}
+
+const resumeRow = (sessionId: string) =>
+  new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`resume:${sessionId}`).setLabel('恢復').setEmoji('▶️').setStyle(ButtonStyle.Success),
+  )
+
+/**
+ * Replace the session's text channel with a forum post: Discord can't move a
+ * channel into a forum, so the post carries a summary and the full conversation.
+ */
+async function archiveToForum(t: Tracked) {
+  const st = t.st
+  const ch = await channelOf(t)
+  if (ch) await queues.get(ch.id) // let pending mirror posts land first
+  const forum = await archiveForum()
+  const md = conversationMarkdown(st)
+  const content = [
+    `📂 \`${st.cwd}\``,
+    `🆔 \`${t.sessionId}\``,
+    `🔴 結束於 <t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`,
+    st.lastPrompt ? `💬 最後說的話：${clip(st.lastPrompt, 300)}` : '',
+    '-# 按「恢復」或在這裡輸入 `/resume` 可以接著做',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const message = {
+    content,
+    components: [resumeRow(t.sessionId)],
+    files: md ? [new AttachmentBuilder(Buffer.from(md, 'utf8'), { name: 'conversation.md' })] : [],
+  }
+  let thread: AnyThreadChannel | undefined
+  if (st.archiveThreadId) {
+    // Ended again after a resume: add to the existing post.
+    const prev = await guild.channels.fetch(st.archiveThreadId).catch(() => null)
+    if (prev?.isThread()) {
+      thread = prev
+      if (thread.archived) await thread.setArchived(false).catch(() => {})
+      await thread.send(message)
+    }
+  }
+  if (!thread) {
+    const name = clip(st.title || st.lastPrompt || basename(st.cwd) || t.sessionId, 100)
+    thread = await forum.threads.create({ name, message })
+  }
+  // Point the session at the post before deleting the channel, so channelDelete doesn't forget it.
+  st.archiveThreadId = st.channelId = thread.id
+  stateDirty = true
+  await ch?.delete('discord-sync: archived to forum').catch(e => log('delete after archive failed:', e?.message))
+}
+
+/** Ended sessions still archived the old way, as a text channel. */
+function legacyArchived(): [string, SessionState][] {
+  return Object.entries(state.sessions).filter(
+    ([sid, st]) => st.ended && !tracked.has(sid) && guild.channels.cache.get(st.channelId)?.type === ChannelType.GuildText,
+  )
+}
+
+let migrating = false
+
+/**
+ * Move old archived text channels into the forum. Sessions with no conversation
+ * can't be resumed, so their channels are just deleted. The archive category is
+ * removed once it's empty.
+ */
+async function migrateToForum(r: Replier) {
+  if (!cfg.archiveForumName) return void (await r.reply('沒有設定論壇（`archiveForumName` 是空的）。'))
+  if (migrating) return void (await r.reply('已經在搬了。'))
+  const items = legacyArchived()
+  if (!items.length) return void (await r.reply('沒有需要搬的頻道。'))
+  migrating = true
+  try {
+    forumFailedAt = 0 // an explicit request: try again even if it failed recently
+    try {
+      await archiveForum()
+    } catch (e: any) {
+      return void (await r.reply(`⚠️ 還是沒辦法建立論壇：${e?.message ?? e}`))
+    }
+    const status = await r.reply(`🗂️ 搬移中… 0/${items.length}`)
+    let moved = 0
+    let dropped = 0
+    const failed: string[] = []
+    for (const [sid, st] of items) {
+      const ch = guild.channels.cache.get(st.channelId)
+      try {
+        if (!st.transcript) {
+          delete state.sessions[sid]
+          stateDirty = true
+          await ch?.delete('discord-sync: empty session')
+          dropped++
+        } else {
+          await archiveToForum({ sessionId: sid, st, ctx: { toolNames: new Map(), showToolCalls: true }, lastTyping: 0 })
+          moved++
+        }
+      } catch (e: any) {
+        failed.push(`#${ch?.name ?? sid}：${e?.message ?? e}`)
+      }
+      await status.edit(`🗂️ 搬移中… ${moved + dropped + failed.length}/${items.length}`).catch(() => {})
+    }
+    await Bun.sleep(1500) // let the channelDelete events update the category's children
+    const cat = state.archiveCategoryId ? guild.channels.cache.get(state.archiveCategoryId) : undefined
+    if (cat?.type === ChannelType.GuildCategory && cat.children.cache.size === 0) {
+      await cat.delete('discord-sync: archive category is empty').catch(() => {})
+      state.archiveCategoryId = undefined
+      stateDirty = true
+    }
+    const lines = [`✅ 搬好了：${moved} 個搬到論壇，${dropped} 個沒有對話的直接刪除。`]
+    if (failed.length) lines.push(`⚠️ ${failed.length} 個失敗：`, ...failed.slice(0, 10).map(f => `- ${clip(f, 150)}`))
+    await status.edit(clip(lines.join('\n'), 2000))
+  } finally {
+    migrating = false
   }
 }
+
+// ---- deleted channels ------------------------------------------------------------
+
+/**
+ * A live session's channel deleted: recreate it (next tick re-tracks the session and posts a backlog).
+ * An ended session's channel or archive post deleted: forget the session.
+ */
+async function onChannelGone(id: string) {
+  for (const t of tracked.values()) {
+    if (t.st.channelId === id) {
+      tracked.delete(t.sessionId)
+      log(`channel of live session ${t.sessionId} deleted; recreating`)
+      return
+    }
+  }
+  for (const [sid, st] of Object.entries(state.sessions)) {
+    if (st.ended && (st.channelId === id || st.archiveThreadId === id)) {
+      delete state.sessions[sid]
+      stateDirty = true
+      log(`archive of ${sid} deleted; forgot the session`)
+      return
+    }
+  }
+  if (id === state.categoryId) {
+    state.categoryId = await ensureCategory(cfg.categoryName, undefined)
+    stateDirty = true
+  }
+}
+
+client.on('channelDelete', ch => void onChannelGone(ch.id).catch(e => log('channelDelete failed:', e?.message ?? e)))
+client.on('threadDelete', th => void onChannelGone(th.id).catch(e => log('threadDelete failed:', e?.message ?? e)))
 
 function pump(t: Tracked) {
   if (!t.tail) {
@@ -254,12 +473,18 @@ function pump(t: Tracked) {
   }
   t.st.offset = t.tail.offset
   stateDirty = true
+  noteLastPrompt(t, blocks)
   if (blocks.length) void post(t, pack(blocks, cfg.attachOver))
   if (newTitle) {
     t.st.title = newTitle
     // Topic edits are rate limited (2 per 10 min per channel); titles change rarely.
     void channelOf(t).then(ch => ch?.setTopic(topicFor(t.sessionId, t.st)).catch(() => {}))
   }
+}
+
+function noteLastPrompt(t: Tracked, blocks: Block[]) {
+  const last = [...blocks].reverse().find(b => b.plain)?.plain
+  if (last) t.st.lastPrompt = last.replace(/\s+/g, ' ').slice(0, 200)
 }
 
 function formatDuration(ms: number): string {
@@ -335,6 +560,8 @@ async function tick() {
         await endTracking(t).catch(e => log('end failed:', e?.message ?? e))
       }
     }
+    await updateConsole().catch(e => log('console update failed:', e?.message ?? e))
+    await cleanupEnded().catch(e => log('cleanup failed:', e?.message ?? e))
   } finally {
     saveState()
     ticking = false
@@ -368,36 +595,23 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  if (/^!new(\s|$)/.test(msg.content)) {
-    if (!cfg.allowFrom.includes(msg.author.id)) void msg.react('🚫').catch(() => {})
-    else await startNewSession(msg).catch(e => void msg.reply(`⚠️ 啟動失敗：${e?.message ?? e}`).catch(() => {}))
+  const cmd = /^!(new|stop|end|resume|migrate)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  if (cmd) {
+    if (!cfg.allowFrom.includes(msg.author.id)) {
+      void msg.react('🚫').catch(() => {})
+      return
+    }
+    const [dir, ...prompt] = (cmd[2] ?? '').split(/(?<=^\S+)\s+/)
+    await runCommand(messageReplier(msg), msg.channelId, cmd[1].toLowerCase() as Command, dir || undefined, prompt.join(' ') || undefined)
     return
   }
   const t = trackedByChannel(msg.channelId)
-  if (!t) {
-    if (/^!resume\s*$/i.test(msg.content)) {
-      if (!cfg.allowFrom.includes(msg.author.id)) void msg.react('🚫').catch(() => {})
-      else await resumeSession(msg).catch(e => void msg.reply(`⚠️ 恢復失敗：${e?.message ?? e}`).catch(() => {}))
-    }
-    return
-  }
+  if (!t) return
   if (!cfg.allowFrom.includes(msg.author.id)) {
     void msg.react('🚫').catch(() => {})
     return
   }
   const peer = t.live ? peers.get(t.live.pid) : undefined
-  if (/^!stop\s*$/i.test(msg.content)) {
-    await stopSession(t, msg, peer).catch(e => void msg.reply(`⚠️ 停止失敗：${e?.message ?? e}`).catch(() => {}))
-    return
-  }
-  if (/^!end\s*$/i.test(msg.content)) {
-    await endSession(t, msg, peer).catch(e => void msg.reply(`⚠️ 結束失敗：${e?.message ?? e}`).catch(() => {}))
-    return
-  }
-  if (/^!resume\s*$/i.test(msg.content)) {
-    await msg.reply('這個 session 還在執行中。')
-    return
-  }
   if (!peer) {
     void msg
       .reply('⚠️ 這個 session 是唯讀的（沒有載入 discord-sync channel）。要從 Discord 對話，請用 `ccd` 啟動 Claude Code。')
@@ -412,6 +626,10 @@ client.on('messageCreate', async (msg: Message) => {
     return
   }
   const files = await downloadAttachments(msg).catch(() => [] as string[])
+  if (msg.content.trim()) {
+    t.st.lastPrompt = msg.content.replace(/\s+/g, ' ').slice(0, 200)
+    stateDirty = true
+  }
   ipcSend(peer, {
     t: 'message',
     content: msg.content || (files.length ? '(attachment)' : ''),
@@ -426,6 +644,38 @@ client.on('messageCreate', async (msg: Message) => {
 })
 
 client.on('interactionCreate', async (i: Interaction) => {
+  if (i.isAutocomplete() && i.commandName === 'new') {
+    await i.respond(dirSuggestions(String(i.options.getFocused()))).catch(() => {})
+    return
+  }
+  if (i.isChatInputCommand() && (COMMANDS as readonly string[]).includes(i.commandName)) {
+    if (!cfg.allowFrom.includes(i.user.id)) {
+      await i.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+      return
+    }
+    await i.deferReply()
+    const r = interactionReplier(i)
+    await runCommand(r, i.channelId, i.commandName as Command, i.options.getString('dir') ?? undefined, i.options.getString('prompt') ?? undefined)
+    return
+  }
+  if (i.isButton() && i.customId.startsWith('resume:')) {
+    if (!cfg.allowFrom.includes(i.user.id)) {
+      await i.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+      return
+    }
+    const sid = i.customId.slice('resume:'.length)
+    const st = state.sessions[sid]
+    await i.deferReply()
+    const r = interactionReplier(i)
+    if (!st) await r.reply('找不到這個 session。')
+    else if (!st.ended) await r.reply(`這個 session 還在執行中：<#${st.channelId}>`)
+    else await resumeSession(r, sid, st).catch(e => void r.reply(`⚠️ 失敗：${e?.message ?? e}`))
+    return
+  }
+  if ((i.isButton() || i.isStringSelectMenu() || i.isModalSubmit()) && i.customId.startsWith('console:')) {
+    await handleConsoleInteraction(i).catch(e => log('console interaction failed:', e?.message ?? e))
+    return
+  }
   if ((i.isButton() || i.isStringSelectMenu() || i.isModalSubmit()) && i.customId.startsWith('ask')) {
     await handleAskInteraction(i).catch(e => log('ask interaction failed:', e?.message ?? e))
     return
@@ -705,35 +955,33 @@ function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down'
   return !cursor || accept.test(cursor) ? 'Enter' : 'Down'
 }
 
-/** `!new <dir> [prompt]`: launch `ccd` in a detached tmux session; its channel appears once it registers. */
-async function startNewSession(msg: Message) {
-  const m = /^!new\s+(\S+)(?:\s+([\s\S]+))?$/.exec(msg.content.trim())
-  if (!m) {
-    await msg.reply('用法：`!new <資料夾> [第一句話]`，例如 `!new ~/proj 幫我看一下測試為什麼失敗`')
+const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir())
+
+/** `new <dir> [prompt]`: launch `ccd` in a detached tmux session; its channel appears once it registers. */
+async function startNewSession(r: Replier, dirArg: string | undefined, prompt: string | undefined) {
+  if (!dirArg) {
+    await r.reply('用法：`!new <資料夾> [第一句話]`，例如 `!new ~/proj 幫我看一下測試為什麼失敗`')
     return
   }
-  const dir = resolve(m[1].replace(/^~(?=\/|$)/, homedir()))
+  const dir = resolve(expandHome(dirArg))
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
-    await msg.reply(`⚠️ 找不到資料夾 \`${dir}\``)
+    await r.reply(`⚠️ 找不到資料夾 \`${dir}\``)
     return
   }
-  await launchInTmux(msg, dir, m[2] ? [m[2].trim()] : [])
+  await launchInTmux(r, dir, prompt ? [prompt.trim()] : [])
 }
 
-/** `!resume` in an ended session's channel: `ccd --resume <id>` in tmux; the channel moves back when it registers. */
-async function resumeSession(msg: Message) {
-  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === msg.channelId)
-  if (!entry) return
-  const [sessionId, st] = entry
+/** `resume` for an ended session: `ccd --resume <id>` in tmux; the channel moves back when it registers. */
+async function resumeSession(r: Replier, sessionId: string, st: SessionState) {
   if (!statSync(st.cwd, { throwIfNoEntry: false })?.isDirectory()) {
-    await msg.reply(`⚠️ 找不到資料夾 \`${st.cwd}\``)
+    await r.reply(`⚠️ 找不到資料夾 \`${st.cwd}\``)
     return
   }
-  await launchInTmux(msg, st.cwd, ['--resume', sessionId])
+  await launchInTmux(r, st.cwd, ['--resume', sessionId])
 }
 
 /** Run ccd with `args` in a detached tmux session and report its channel once it registers. */
-async function launchInTmux(msg: Message, dir: string, args: string[]) {
+async function launchInTmux(r: Replier, dir: string, args: string[]) {
   const name = `ccd-${Math.random().toString(36).slice(2, 6)}`
   const cmd = ['exec', CCD, ...args].map((a, i) => (i ? shq(a) : a)).join(' ')
   // `exec` makes the pane's process Claude Code itself, so pane_pid identifies the session.
@@ -743,7 +991,7 @@ async function launchInTmux(msg: Message, dir: string, args: string[]) {
     ';', 'set-option', '-t', name, 'remain-on-exit', 'on',
   ])
   const panePid = Number(stdout.trim())
-  const status = await msg.reply(`🚀 已在 tmux \`${name}\` 啟動，等待 session 註冊…\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
+  const status = await r.reply(`🚀 已在 tmux \`${name}\` 啟動，等待 session 註冊…\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
 
   const answered = new Set<RegExp>()
   let downs = 0
@@ -868,25 +1116,25 @@ async function typeInto(
  * channel server's terminal. If that fails or doesn't take, leave a flag for
  * stop-hook.sh to stop Claude before its next tool call.
  */
-async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
+async function stopSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   if (t.live?.status !== 'busy') {
     // Esc on an idle prompt is harmless once, but a double Esc opens the rewind menu.
-    await msg.reply('Claude 目前沒在工作。')
+    await r.reply('Claude 目前沒在工作。')
     return
   }
   const pid = t.live.pid
   const { via, error } = await typeInto(pid, peer, '\x1b', [['Escape']])
   if (error) {
     if (!peer) {
-      await msg.reply(`⚠️ 送不出 Esc：${error}`)
+      await r.reply(`⚠️ 送不出 Esc：${error}`)
       return
     }
     setStopFlag(t)
-    await msg.reply(`⚠️ 送不出 Esc（${error}），改成在 Claude 下一次使用工具前停止。`)
+    await r.reply(`⚠️ 送不出 Esc（${error}），改成在 Claude 下一次使用工具前停止。`)
     return
   }
-  void msg.react('⏹️').catch(() => {})
-  const reply = await msg.reply(`⏹️ 已送出 Esc（${via}），確認中…`)
+  r.react('⏹️')
+  const reply = await r.reply(`⏹️ 已送出 Esc（${via}），確認中…`)
   await Bun.sleep(4000)
   if (t.live?.pid === pid && t.live.status === 'busy' && peer) {
     setStopFlag(t)
@@ -897,32 +1145,306 @@ async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
 }
 
 /** `!end`: interrupt if busy, then type `/exit`. The channel is archived when the process goes away. */
-async function endSession(t: Tracked, msg: Message, peer: Socket | undefined) {
+async function endSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   const pid = t.live?.pid
   if (!pid) return
   if (t.live?.status === 'busy') {
     const { error } = await typeInto(pid, peer, '\x1b', [['Escape']])
     if (error) {
-      await msg.reply(`⚠️ 沒辦法中斷目前的工作：${error}`)
+      await r.reply(`⚠️ 沒辦法中斷目前的工作：${error}`)
       return
     }
     await Bun.sleep(1500)
   }
   const { via, error } = await typeInto(pid, peer, '/exit\r', [['-l', '/exit'], ['Enter']])
   if (error) {
-    await msg.reply(`⚠️ 沒辦法結束：${error}`)
+    await r.reply(`⚠️ 沒辦法結束：${error}`)
     return
   }
-  const reply = await msg.reply(`👋 已送出 \`/exit\`（${via}），等待 session 結束…`)
+  const reply = await r.reply(`👋 已送出 \`/exit\`（${via}），等待 session 結束…`)
   const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
     await Bun.sleep(1000)
     if (!tracked.has(t.sessionId)) {
-      await reply.edit('👋 Session 已結束，之後可以在這裡輸入 `!resume` 恢復。').catch(() => {})
+      await reply.edit('👋 Session 已結束，之後可以在這裡輸入 `/resume` 或 `!resume` 恢復。').catch(() => {})
       return
     }
   }
   await reply.edit('⚠️ 送出 `/exit` 後 15 秒 session 還在，可能有對話框擋住了。').catch(() => {})
+}
+
+// ---- commands: !text, /slash and the console share these --------------------
+
+const COMMANDS = ['new', 'stop', 'end', 'resume', 'migrate'] as const
+type Command = (typeof COMMANDS)[number]
+
+/** Where a command's status messages go. `reply` returns a handle to edit that message later. */
+type Replier = {
+  reply(text: string): Promise<{ edit(text: string): Promise<unknown> }>
+  react(emoji: string): void
+}
+
+function messageReplier(msg: Message): Replier {
+  return {
+    reply: async text => {
+      const m = await msg.reply(text)
+      return { edit: t => m.edit(t) }
+    },
+    react: emoji => void msg.react(emoji).catch(() => {}),
+  }
+}
+
+/** For an interaction that has already been deferred: the first reply fills the deferred one. */
+function interactionReplier(i: RepliableInteraction, ephemeral = false): Replier {
+  let first = true
+  return {
+    reply: async text => {
+      if (first) {
+        first = false
+        await i.editReply(text)
+        return { edit: t => i.editReply(t) }
+      }
+      const m = await i.followUp({ content: text, ephemeral })
+      return { edit: t => i.webhook.editMessage(m, { content: t }) }
+    },
+    react: () => {},
+  }
+}
+
+function endedByChannel(channelId: string): [string, SessionState] | undefined {
+  return Object.entries(state.sessions).find(([, st]) => st.ended && st.channelId === channelId)
+}
+
+/** Run `cmd` for the session whose channel is `channelId` (`new` works anywhere). */
+async function runCommand(r: Replier, channelId: string, cmd: Command, dir?: string, prompt?: string) {
+  try {
+    if (cmd === 'new') return await startNewSession(r, dir, prompt)
+    if (cmd === 'migrate') return await migrateToForum(r)
+    const t = trackedByChannel(channelId)
+    if (cmd === 'resume') {
+      if (t) return void (await r.reply('這個 session 還在執行中。'))
+      const ended = endedByChannel(channelId)
+      if (!ended) return void (await r.reply('這裡不是 session 頻道。'))
+      return await resumeSession(r, ...ended)
+    }
+    if (!t) return void (await r.reply(endedByChannel(channelId) ? '這個 session 已經結束了。' : '這裡不是 session 頻道。'))
+    const peer = t.live ? peers.get(t.live.pid) : undefined
+    if (cmd === 'stop') return await stopSession(t, r, peer)
+    return await endSession(t, r, peer)
+  } catch (e: any) {
+    await r.reply(`⚠️ 失敗：${e?.message ?? e}`).catch(() => {})
+  }
+}
+
+const SLASH_COMMANDS = [
+  new SlashCommandBuilder()
+    .setName('new')
+    .setDescription('在 tmux 裡開一個新的 Claude Code session')
+    .addStringOption(o => o.setName('dir').setDescription('資料夾').setRequired(true).setAutocomplete(true))
+    .addStringOption(o => o.setName('prompt').setDescription('第一句話（選填）')),
+  new SlashCommandBuilder().setName('stop').setDescription('中斷這個 session 目前的工作（按 Esc）'),
+  new SlashCommandBuilder().setName('end').setDescription('結束這個 session（/exit）'),
+  new SlashCommandBuilder().setName('resume').setDescription('恢復這個已結束的 session'),
+  new SlashCommandBuilder().setName('migrate').setDescription('把舊的已結束頻道搬到論壇'),
+]
+
+/** Autocomplete for /new: subfolders of what's typed so far, then recently used folders. */
+function dirSuggestions(typed: string): { name: string; value: string }[] {
+  const out = new Set<string>()
+  const expanded = expandHome(typed)
+  if (typed.includes('/')) {
+    const base = expanded.endsWith('/') ? expanded : dirname(expanded) + '/'
+    const prefix = expanded.endsWith('/') ? '' : basename(expanded)
+    try {
+      for (const e of readdirSync(base, { withFileTypes: true })) {
+        if (e.isDirectory() && !e.name.startsWith('.') && e.name.startsWith(prefix)) out.add(join(base, e.name))
+      }
+    } catch {}
+  }
+  const recent = Object.values(state.sessions)
+    .sort((a, b) => (b.endedAt ?? Number.MAX_SAFE_INTEGER) - (a.endedAt ?? Number.MAX_SAFE_INTEGER))
+    .map(st => st.cwd)
+  for (const cwd of recent) if (cwd.includes(expanded)) out.add(cwd)
+  return [...out]
+    .filter(d => d.length <= 100)
+    .slice(0, 25)
+    .map(d => ({ name: d, value: d }))
+}
+
+// ---- console channel: every session at a glance -------------------------------
+
+let consoleRendered = ''
+let consoleEditedAt = 0
+
+const statusIcon = (status?: string) => (status === 'busy' ? '🟡 工作中' : status === 'idle' ? '🟢 閒置' : '⏳ 等待中')
+const channelLabel = (st: SessionState) => {
+  const name = guild.channels.cache.get(st.channelId)?.name
+  return st.archiveThreadId === st.channelId ? '🗂️' : name ? `#${name}` : '（頻道已刪除）'
+}
+
+/** Coarse on purpose: the console is re-rendered whenever this text changes. */
+function ago(ms: number | undefined): string {
+  if (!ms) return ''
+  const h = Math.floor((Date.now() - ms) / 3_600_000)
+  return h < 1 ? '1 小時內' : h < 24 ? `${h} 小時前` : `${Math.floor(h / 24)} 天前`
+}
+
+/** What a session was about: its title, else the last thing the user said. */
+const sessionTopic = (st: SessionState) => st.title || (st.lastPrompt ? `「${st.lastPrompt}」` : '')
+
+function sessionOption(sid: string, st: SessionState) {
+  const label = [channelLabel(st), sessionTopic(st)].filter(Boolean).join(' · ')
+  const description = [st.ended ? `結束於 ${ago(st.endedAt)}` : '', st.cwd].filter(Boolean).join(' · ')
+  return { label: clip(label, 100), description: clip(description, 100), value: sid }
+}
+
+function recentEnded(n: number): [string, SessionState][] {
+  return Object.entries(state.sessions)
+    // No transcript = nothing was ever said, so there is nothing to resume.
+    .filter(([sid, st]) => st.ended && st.transcript && !tracked.has(sid))
+    .sort(([, a], [, b]) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
+    .slice(0, n)
+}
+
+function consoleView() {
+  const live = [...tracked.values()].filter(t => t.live)
+  const ended = recentEnded(25)
+  const lines = ['## 🖥️ Claude Sessions', '**執行中**']
+  if (!live.length) lines.push('-# （沒有）')
+  for (const t of live) {
+    const topic = sessionTopic(t.st)
+    lines.push(`${statusIcon(t.live!.status)} · <#${t.st.channelId}> · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
+  }
+  lines.push('', '**最近結束**')
+  if (!ended.length) lines.push('-# （沒有）')
+  for (const [, st] of ended.slice(0, 10)) {
+    const topic = sessionTopic(st)
+    lines.push(`⚫ <#${st.channelId}> · ${ago(st.endedAt)} · \`${st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
+  }
+
+  const menu = (id: string, placeholder: string, items: [string, SessionState][]) =>
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(id)
+        .setPlaceholder(placeholder)
+        .addOptions(items.slice(0, 25).map(([sid, st]) => sessionOption(sid, st))),
+    )
+  const busy = live.filter(t => t.live!.status === 'busy').map(t => [t.sessionId, t.st] as [string, SessionState])
+  const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = []
+  if (busy.length) components.push(menu('console:stop', '⏹️ 中斷工作中的 session…', busy))
+  if (live.length) components.push(menu('console:end', '👋 結束 session…', live.map(t => [t.sessionId, t.st])))
+  if (ended.length) components.push(menu('console:resume', '▶️ 恢復已結束的 session…', ended))
+  const buttons = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('console:new').setLabel('開新 session').setEmoji('🆕').setStyle(ButtonStyle.Primary),
+  )
+  const legacy = forumAvailable() ? legacyArchived().length : 0
+  if (legacy) {
+    buttons.addComponents(
+      new ButtonBuilder().setCustomId('console:migrate').setLabel(`把 ${legacy} 個舊頻道搬到論壇`).setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
+    )
+  }
+  components.push(buttons)
+  return { content: clip(lines.join('\n'), 2000), components }
+}
+
+async function consoleChannel(): Promise<TextChannel | undefined> {
+  if (!cfg.consoleChannelName) return undefined
+  const cached = state.consoleChannelId ? guild.channels.cache.get(state.consoleChannelId) : undefined
+  if (cached?.type === ChannelType.GuildText) return cached
+  const ch = await guild.channels.create({
+    name: cfg.consoleChannelName,
+    type: ChannelType.GuildText,
+    parent: state.categoryId,
+    position: 0,
+    topic: '所有 Claude Code session 的狀態；也可以在這裡輸入 /new 或 !new',
+  })
+  state.consoleChannelId = ch.id
+  state.consoleMessageId = undefined
+  stateDirty = true
+  return ch
+}
+
+/** Keep the console's status message current; edits are skipped when nothing changed and throttled. */
+async function updateConsole() {
+  const ch = await consoleChannel()
+  if (!ch) return
+  const view = consoleView()
+  const rendered = JSON.stringify({ c: view.content, k: view.components.map(c => c.toJSON()) })
+  if (rendered === consoleRendered && state.consoleMessageId) return
+  if (Date.now() - consoleEditedAt < 3000) return
+  consoleEditedAt = Date.now()
+  if (state.consoleMessageId) {
+    const ok = await ch.messages
+      .edit(state.consoleMessageId, { ...view, allowedMentions: { parse: [] } })
+      .then(() => true)
+      .catch(() => false)
+    if (ok) {
+      consoleRendered = rendered
+      return
+    }
+  }
+  // First run, or someone deleted the message: post a fresh one.
+  const m = await ch.send({ ...view, allowedMentions: { parse: [] } })
+  state.consoleMessageId = m.id
+  stateDirty = true
+  consoleRendered = rendered
+}
+
+async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
+  if (!cfg.allowFrom.includes(i.user.id)) {
+    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    return
+  }
+  if (i.isButton() && i.customId === 'console:new') {
+    const dir = new TextInputBuilder().setCustomId('dir').setLabel('資料夾').setStyle(TextInputStyle.Short).setRequired(true)
+    const last = recentEnded(1)[0]?.[1].cwd ?? [...tracked.values()][0]?.st.cwd
+    if (last) dir.setPlaceholder(clip(last, 100))
+    const prompt = new TextInputBuilder().setCustomId('prompt').setLabel('第一句話（選填）').setStyle(TextInputStyle.Paragraph).setRequired(false)
+    await i.showModal(
+      new ModalBuilder()
+        .setCustomId('console:newmodal')
+        .setTitle('開新 session')
+        .addComponents(
+          new ActionRowBuilder<TextInputBuilder>().addComponents(dir),
+          new ActionRowBuilder<TextInputBuilder>().addComponents(prompt),
+        ),
+    )
+    return
+  }
+  await i.deferReply({ ephemeral: true })
+  const r = interactionReplier(i, true)
+  if (i.isButton() && i.customId === 'console:migrate') {
+    await runCommand(r, '', 'migrate')
+    return
+  }
+  if (i.isModalSubmit()) {
+    await runCommand(r, '', 'new', i.fields.getTextInputValue('dir').trim(), i.fields.getTextInputValue('prompt').trim() || undefined)
+    return
+  }
+  if (!i.isStringSelectMenu()) return
+  const action = i.customId.slice('console:'.length) as Command
+  const st = state.sessions[i.values[0]]
+  if (!st || !COMMANDS.includes(action)) return void (await r.reply('找不到這個 session。'))
+  await runCommand(r, st.channelId, action)
+  consoleRendered = '' // Reset the menu's selection on the next tick.
+}
+
+// ---- cleanup of old ended channels ----------------------------------------------
+
+let cleanedAt = 0
+
+async function cleanupEnded() {
+  if (cfg.deleteEndedAfterDays <= 0 || Date.now() - cleanedAt < 10 * 60_000) return
+  cleanedAt = Date.now()
+  const cutoff = Date.now() - cfg.deleteEndedAfterDays * 86_400_000
+  for (const [sid, st] of Object.entries(state.sessions)) {
+    if (!st.ended || !st.endedAt || st.endedAt > cutoff || tracked.has(sid) || creating.has(sid)) continue
+    const ch = await guild.channels.fetch(st.channelId).catch(() => null)
+    await ch?.delete('discord-sync: session ended long ago').catch(e => log(`delete #${ch.name} failed:`, e?.message))
+    delete state.sessions[sid]
+    stateDirty = true
+    log(`deleted channel for ${sid} (ended ${new Date(st.endedAt).toISOString()})`)
+  }
 }
 
 // ---- channel-server connections -------------------------------------------
@@ -1036,8 +1558,25 @@ client.once('clientReady', async c => {
     state.sessions = {}
   }
   state.categoryId = await ensureCategory(cfg.categoryName, state.categoryId)
-  state.archiveCategoryId = cfg.archiveCategoryName ? await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId) : undefined
+  // In forum mode the archive category is only created if archiving falls back to it.
+  state.archiveCategoryId =
+    cfg.archiveCategoryName && !cfg.archiveForumName ? await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId) : state.archiveCategoryId
+  // Sessions archived before endedAt existed: start their cleanup clock now.
+  for (const st of Object.values(state.sessions)) if (st.ended && !st.endedAt) st.endedAt = Date.now()
+  // Sessions recorded before lastPrompt existed: recover it from the transcript once.
+  for (const st of Object.values(state.sessions)) {
+    if (st.lastPrompt || !st.transcript) continue
+    try {
+      const ctx: RenderContext = { toolNames: new Map(), showToolCalls: false }
+      const plain = new JsonlTail(st.transcript).read().flatMap(o => renderRecord(o, ctx)).filter(b => b.plain)
+      if (plain.length) st.lastPrompt = plain[plain.length - 1].plain!.replace(/\s+/g, ' ').slice(0, 200)
+    } catch {}
+  }
   stateDirty = true
+  // Needs the applications.commands scope; the ! commands keep working without it.
+  await guild.commands
+    .set(SLASH_COMMANDS.map(c => c.toJSON()))
+    .catch(e => log(`slash commands not registered (${e?.message}); re-invite the bot with the applications.commands scope`))
   log(`syncing into ${guild.name} (${guild.id})`)
   startIpc()
   setInterval(() => void tick(), TICK_MS)

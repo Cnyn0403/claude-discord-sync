@@ -19,7 +19,13 @@ export type Config = {
   /** Discord user IDs allowed to talk to sessions and answer permission prompts. */
   allowFrom: string[]
   categoryName: string
-  /** Ended sessions are moved here. Empty string = leave them in place. */
+  /**
+   * Ended sessions become a post in this forum channel (summary, full conversation
+   * as .md, resume button) and their text channel is deleted. Empty string = use
+   * archiveCategoryName instead.
+   */
+  archiveForumName: string
+  /** Without a forum: ended sessions are moved to this category. Empty string = leave them in place. */
   archiveCategoryName: string
   /** Session kinds (from ~/.claude/sessions/<pid>.json) to mirror. */
   kinds: string[]
@@ -31,6 +37,10 @@ export type Config = {
   notifyMinBusySec: number
   /** Replies longer than this many characters are posted as a preview plus a .md attachment. */
   attachOver: number
+  /** Channel listing every session with stop/end/resume menus. Empty string = no console. */
+  consoleChannelName: string
+  /** Delete channels of sessions that ended this many days ago. 0 = keep forever. */
+  deleteEndedAfterDays: number
 }
 
 function readEnvFile(path: string): Record<string, string> {
@@ -68,11 +78,14 @@ export function loadConfig(): Config {
     guildId: file.guildId,
     allowFrom: file.allowFrom ?? officialAccess?.allowFrom ?? [],
     categoryName: file.categoryName ?? 'Claude Sessions',
+    archiveForumName: file.archiveForumName ?? 'claude-已結束',
     archiveCategoryName: file.archiveCategoryName ?? 'Claude Sessions (ended)',
     kinds: file.kinds ?? ['interactive'],
     backlog: file.backlog ?? 15,
     showToolCalls: file.showToolCalls ?? true,
     notifyMinBusySec: file.notifyMinBusySec ?? 15,
     attachOver: file.attachOver ?? 3800,
+    consoleChannelName: file.consoleChannelName ?? 'claude-控制台',
+    deleteEndedAfterDays: file.deleteEndedAfterDays ?? 7,
   }
 }
