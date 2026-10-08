@@ -2,12 +2,13 @@ import { readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { setLanguage, m, type Language } from './i18n'
+import { ipcPath } from './platform'
 
 export const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 export const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions')
 export const PROJECTS_DIR = join(CLAUDE_DIR, 'projects')
 export const STATE_DIR = process.env.DISCORD_SYNC_STATE_DIR ?? join(CLAUDE_DIR, 'channels', 'discord-sync')
-export const SOCKET_PATH = join(STATE_DIR, 'daemon.sock')
+export const SOCKET_PATH = ipcPath(STATE_DIR)
 
 // The official discord plugin's state dir; used as a fallback for the bot
 // token and the allowlist so a user who already set that up needs no config.

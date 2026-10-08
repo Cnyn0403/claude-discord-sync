@@ -3,11 +3,14 @@
 import { Client, GatewayIntentBits, PermissionFlagsBits } from 'discord.js'
 import { loadConfig, STATE_DIR } from './config'
 import { scanSessions, findTranscript } from './sessions'
+import { hasTmux, IS_WIN } from './platform'
 
 const cfg = loadConfig()
 console.log(`state dir:   ${STATE_DIR}`)
 console.log(`allowFrom:   ${cfg.allowFrom.join(', ') || '(empty!)'}`)
 console.log(`guildId:     ${cfg.guildId ?? '(auto)'}`)
+console.log(`platform:    ${process.platform} ${process.arch}`)
+console.log(`/new:        ${hasTmux() ? 'tmux' : IS_WIN ? 'new console window (experimental)' : 'unavailable: install tmux'}`)
 
 console.log('\nlive sessions:')
 for (const s of scanSessions()) {

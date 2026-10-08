@@ -18,7 +18,7 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
  │   🗂️ 封存論壇          │   │                   │                          │
  └───────────────────────┘   │ channel-server.ts（每個 ccd session 一個）    │
                              │  └ MCP channel：Discord ⇄ Claude Code         │
-                             │ ask-hook.ts / stop-hook.sh（ccd 掛的 hook）   │
+                             │ ask-hook.ts / stop-hook.ts（ccd 掛的 hook）   │
                              └──────────────────────────────────────────────┘
 ```
 
@@ -36,11 +36,22 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 
 ## 需求
 
-- Linux（用到 `/proc` 和 `TIOCSTI`）
+- Linux、macOS 或 Windows 10/11（見[平台支援](#平台支援)）
 - [Bun](https://bun.sh)
 - 支援 channels 的 [Claude Code](https://claude.com/claude-code)
-- tmux（`/new` 和 `/resume` 需要）
+- Linux 和 macOS 上的 `/new`、`/resume` 需要 tmux（`brew install tmux`、`apt install tmux`）
 - 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)）
+
+## 平台支援
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| 同步、對話、選擇題、計畫、權限、控制台、封存 | ✅ | ✅ | ✅ |
+| `/stop`、`/end` | tmux 或 `TIOCSTI` | tmux 或透過系統內建 Perl 的 `TIOCSTI` | 把按鍵送進 session 的主控台（**實驗性**） |
+| `/new`、`/resume` | tmux | tmux | 開一個新的主控台視窗（**實驗性**） |
+| 開機自動啟動 daemon | `contrib/` 裡的 systemd unit | launchd／登入項目 | 工作排程器／啟動資料夾 |
+
+Linux 是測試過的平台，macOS 和 Windows 是新加入的支援，遇到問題請[開 issue](https://github.com/Cnyn0403/claude-discord-sync/issues)。不論哪個平台，按鍵送不出去時，`/stop` 都會改成在 Claude 下一次使用工具前停止。
 
 ## 安裝
 
@@ -94,10 +105,14 @@ journalctl --user -u claude-discord-sync -f
 
 ### 4. 用 `ccd` 啟動 Claude Code
 
+Linux 和 macOS：
+
 ```bash
 ln -s ~/claude-discord-sync/bin/ccd ~/.local/bin/ccd
 ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd --resume
 ```
+
+Windows（PowerShell 或 cmd）：把 repo 裡的 `bin` 資料夾加進 `PATH`，之後一樣輸入 `ccd`，會執行 `bin\ccd.cmd`。
 
 `ccd` 會載入 discord-sync 的 channel 和 hook。啟動時 Claude Code 會要你確認 development channel，因為自製的 channel 目前還是 research preview。
 
@@ -167,7 +182,7 @@ ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd -
 | Discord → 本機 | `ccd` 會把 `channel-server.ts` 當成 Claude Code 的 channel 載入，訊息以 `<channel source="discord-sync">` 的形式送進 session |
 | 權限 | channel 的 permission relay 會貼出「允許 / 拒絕」按鈕 |
 | 選擇題和計畫 | `AskUserQuestion` 和 `ExitPlanMode` 的 `PreToolUse` hook（`src/ask-hook.ts`）會請 daemon 貼出選單或按鈕，再透過 `updatedInput.answers` 交回答案，或是帶著意見允許／拒絕 |
-| 中斷 | session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude Code 的終端機。兩者都不行時，`bin/stop-hook.sh` 會在 Claude 下一次使用工具前停下它 |
+| 中斷 | session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude Code 的終端機。兩者都不行時，`src/stop-hook.ts` 會在 Claude 下一次使用工具前停下它 |
 | 開新 / 恢復 | 用 `tmux new-session` 執行 `ccd`，自動接受啟動時的確認畫面（development channel、信任資料夾）；啟動失敗時會把最後的畫面貼回來 |
 | 刪除頻道 | 執行中 session 的頻道被刪掉時，會自動重建並補貼最近的訊息。封存貼文或已結束的頻道被刪掉時，會把 session 從清單移除 |
 
@@ -184,6 +199,7 @@ ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd -
 - transcript 的 JSONL 格式是 Claude Code 的內部格式，可能會變動，到時候 `src/render.ts` 需要跟著調整。
 - `ccd` 的選擇題或計畫在 Discord 等待回答時，終端機不會出現對話框。要在本機回答，請在 Discord 按「改在終端機回答」，或等待逾時。
 - 很多 Linux 6.2 以後的核心預設關閉 `TIOCSTI`（`dev.tty.legacy_tiocsti=0`）。這時 `/stop` 只對 tmux 裡的 session 有效，否則只能靠 stop hook，而它停不下正在跑的長指令。
+- Windows 上的 `/new`、`/resume` 是靠讀取新視窗的畫面來按掉啟動確認畫面，能不能成功取決於你的終端機怎麼承載主控台。
 - `/clear` 會產生新的 session ID，所以會開一個新頻道，舊的會被封存。
 
 ## 授權

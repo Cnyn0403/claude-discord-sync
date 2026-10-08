@@ -18,7 +18,7 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
  │   🗂️ archive forum     │   │                   │                          │
  └───────────────────────┘   │ channel-server.ts (one per ccd session)      │
                              │  └ MCP channel: Discord ⇄ Claude Code         │
-                             │ ask-hook.ts / stop-hook.sh (ccd hooks)       │
+                             │ ask-hook.ts / stop-hook.ts (ccd hooks)       │
                              └──────────────────────────────────────────────┘
 ```
 
@@ -36,11 +36,22 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 
 ## Requirements
 
-- Linux (uses `/proc` and `TIOCSTI`)
+- Linux, macOS, or Windows 10/11 (see [Platform support](#platform-support))
 - [Bun](https://bun.sh)
 - [Claude Code](https://claude.com/claude-code) with channels support
-- tmux, for `/new` and `/resume`
+- tmux for `/new` and `/resume` on Linux and macOS (`brew install tmux`, `apt install tmux`)
 - A Discord bot in a **private** server (see [Security](#security))
+
+## Platform support
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Mirroring, chat, questions, plans, permissions, console, archive | ✅ | ✅ | ✅ |
+| `/stop`, `/end` | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
+| `/new`, `/resume` | tmux | tmux | opens a new console window (**experimental**) |
+| Run the daemon at login | systemd unit in `contrib/` | launchd / login item | Task Scheduler / Startup folder |
+
+Linux is the tested platform. macOS and Windows support is new; please [open an issue](https://github.com/Cnyn0403/claude-discord-sync/issues) if something doesn't work. On every platform, `/stop` falls back to stopping Claude before its next tool call when keys can't be typed.
 
 ## Setup
 
@@ -94,10 +105,14 @@ journalctl --user -u claude-discord-sync -f
 
 ### 4. Start Claude Code with `ccd`
 
+Linux and macOS:
+
 ```bash
 ln -s ~/claude-discord-sync/bin/ccd ~/.local/bin/ccd
 ccd                 # same as `claude`; all arguments pass through, e.g. ccd --resume
 ```
+
+Windows (PowerShell or cmd): add the repo's `bin` folder to your `PATH`, then run `ccd` the same way. It runs `bin\ccd.cmd`.
 
 `ccd` loads the discord-sync channel and its hooks. Claude Code asks you to confirm the development channel on startup, because custom channels are a research preview.
 
@@ -167,7 +182,7 @@ Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how 
 | Discord → local | `ccd` loads `channel-server.ts` as a Claude Code channel; messages arrive as `<channel source="discord-sync">` |
 | Permissions | The channel's permission relay posts *Allow / Deny* buttons |
 | Questions and plans | A `PreToolUse` hook (`src/ask-hook.ts`) on `AskUserQuestion` and `ExitPlanMode` asks the daemon, which posts components and returns the answer through `updatedInput.answers`, or allow / deny with feedback |
-| Interrupt | tmux `send-keys Escape` when the session runs in tmux; otherwise the channel server types Esc into Claude Code's terminal with `TIOCSTI`. If neither works, `bin/stop-hook.sh` stops Claude before its next tool call |
+| Interrupt | tmux `send-keys Escape` when the session runs in tmux; otherwise the channel server types Esc into Claude Code's terminal with `TIOCSTI`. If neither works, `src/stop-hook.ts` stops Claude before its next tool call |
 | New / resume | `tmux new-session` running `ccd`; startup dialogs (development channel, folder trust) are accepted automatically, and the last screen is posted if startup fails |
 | Deleted channels | A deleted live channel is recreated with a backlog. A deleted archive post or ended channel removes the session from the lists |
 
@@ -184,6 +199,7 @@ Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how 
 - The transcript JSONL format is internal to Claude Code and may change; `src/render.ts` may need updates.
 - While a `ccd` question or plan waits on Discord, no dialog appears in the terminal. Press *Answer in terminal* on Discord, or wait for the timeout.
 - `TIOCSTI` is disabled by default on many Linux 6.2+ kernels (`dev.tty.legacy_tiocsti=0`). Then `/stop` only works for tmux sessions or through the stop hook, which can't stop a long-running command.
+- On Windows, `/new` and `/resume` accept the startup dialogs by reading the new window's screen, which depends on how your terminal hosts the console.
 - `/clear` starts a new session ID, so it opens a new channel and archives the old one.
 
 ## License

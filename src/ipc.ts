@@ -1,8 +1,10 @@
 import type { Socket } from 'net'
+import type { Key } from './keys'
 
 /** Messages from a per-session channel server to the daemon. */
 export type ClientMsg =
-  | { t: 'hello'; claudePid: number }
+  /** tmux: the pane Claude Code runs in, if any (inherited TMUX / TMUX_PANE). */
+  | { t: 'hello'; claudePid: number; tmux?: { socket: string; pane: string } }
   | { t: 'permission_request'; request_id: string; tool_name: string; description: string; input_preview: string }
   | { t: 'send_file'; id: number; path: string; caption?: string }
   | { t: 'type_result'; ok: boolean; error?: string }
@@ -26,8 +28,8 @@ export type DaemonMsg =
   /** question text -> answer; undefined = answer in the local terminal instead. */
   | { t: 'ask_result'; answers?: Record<string, string> }
   | { t: 'plan_result'; approved: boolean; feedback?: string }
-  /** !stop / !end: type keys into the session's terminal (e.g. Esc, "/exit\r"). */
-  | { t: 'type'; text: string }
+  /** /stop, /end: type keys into the session's terminal. */
+  | { t: 'type'; keys: Key[] }
 
 export function send(sock: Socket, msg: ClientMsg | DaemonMsg): void {
   if (!sock.destroyed) sock.write(JSON.stringify(msg) + '\n')

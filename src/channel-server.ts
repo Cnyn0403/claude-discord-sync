@@ -9,7 +9,7 @@
  *   Discord message      -> notifications/claude/channel            -> session
  *   permission prompt    -> daemon (buttons in the session channel)
  *   button / "yes xxxxx" -> notifications/claude/channel/permission -> session
- *   !stop / !end         -> Esc or "/exit" typed into the session's terminal
+ *   /stop, /end          -> keys typed into the session's terminal (Linux, macOS)
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -17,11 +17,10 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { z } from 'zod'
 import { connect, type Socket } from 'net'
 import { isAbsolute } from 'path'
-import { openSync, closeSync } from 'fs'
-import { dlopen, FFIType, ptr } from 'bun:ffi'
 import { SOCKET_PATH } from './config'
 import { findClaudePid } from './sessions'
 import { send, onLines, type DaemonMsg, type ClientMsg } from './ipc'
+import { typeIntoOwnTty, keysToTty } from './keys'
 
 const claudePid = Number(process.env.CLAUDE_PID) || findClaudePid(process.ppid)
 
@@ -46,33 +45,6 @@ const mcp = new Server(
   },
 )
 
-// ---- interrupt --------------------------------------------------------------
-
-const TIOCSTI = 0x5412
-
-/**
- * Type into Claude Code's TUI. We inherit its controlling terminal, and
- * TIOCSTI queues bytes as if typed there. Linux 6.2+ can disable TIOCSTI
- * (dev.tty.legacy_tiocsti=0); the daemon then falls back to a stop hook.
- */
-function typeKeys(text: string): { ok: boolean; error?: string } {
-  let fd: number | undefined
-  try {
-    const libc = dlopen('libc.so.6', { ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 } })
-    fd = openSync('/dev/tty', 'r+')
-    // TIOCSTI queues one byte per call.
-    const bytes = new TextEncoder().encode(text)
-    for (let i = 0; i < bytes.length; i++) {
-      if (libc.symbols.ioctl(fd, TIOCSTI, ptr(bytes, i)) !== 0) return { ok: false, error: 'TIOCSTI rejected' }
-    }
-    return { ok: true }
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message ?? e) }
-  } finally {
-    if (fd !== undefined) closeSync(fd)
-  }
-}
-
 // ---- daemon connection ----------------------------------------------------
 
 let sock: Socket | undefined
@@ -89,7 +61,9 @@ function connectDaemon() {
   const s = connect(SOCKET_PATH)
   s.on('connect', () => {
     sock = s
-    if (claudePid) send(s, { t: 'hello', claudePid })
+    const tmuxSocket = process.env.TMUX?.split(',')[0]
+    const pane = process.env.TMUX_PANE
+    if (claudePid) send(s, { t: 'hello', claudePid, ...(tmuxSocket && pane ? { tmux: { socket: tmuxSocket, pane } } : {}) })
     process.stderr.write(`discord-sync: connected to daemon (claude pid ${claudePid})\n`)
   })
   onLines<DaemonMsg>(s, msg => {
@@ -103,7 +77,7 @@ function connectDaemon() {
         params: { request_id: msg.request_id, behavior: msg.behavior },
       })
     } else if (msg.t === 'type') {
-      toDaemon({ t: 'type_result', ...typeKeys(msg.text) })
+      toDaemon({ t: 'type_result', ...typeIntoOwnTty(keysToTty(msg.keys)) })
     } else if (msg.t === 'result') {
       pending.get(msg.id)?.(msg)
       pending.delete(msg.id)

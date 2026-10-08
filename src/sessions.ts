@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, existsSync, openSync, readSync, closeSync, statSync } from 'fs'
 import { join } from 'path'
 import { SESSIONS_DIR, PROJECTS_DIR } from './config'
+import { parentPid, procStart } from './platform'
 
 /** One entry of Claude Code's live-session registry (~/.claude/sessions/<pid>.json). */
 export type LiveSession = {
@@ -11,16 +12,8 @@ export type LiveSession = {
   status?: string
   kind?: string
   procStart?: string
-}
-
-function procStartOf(pid: number): string | undefined {
-  try {
-    // Field 22 of /proc/<pid>/stat; comm (field 2) may contain spaces, so split after the last ')'.
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
-  } catch {
-    return undefined
-  }
+  /** ms since epoch */
+  startedAt?: number
 }
 
 export function isAlive(s: Pick<LiveSession, 'pid' | 'procStart'>): boolean {
@@ -30,8 +23,8 @@ export function isAlive(s: Pick<LiveSession, 'pid' | 'procStart'>): boolean {
     if (e?.code !== 'EPERM') return false
   }
   // Guard against PID reuse when the registry entry records the process start time.
-  if (s.procStart && process.platform === 'linux') {
-    const actual = procStartOf(s.pid)
+  if (s.procStart) {
+    const actual = procStart(s.pid)
     if (actual !== undefined && actual !== s.procStart) return false
   }
   return true
@@ -56,14 +49,9 @@ export function scanSessions(): LiveSession[] {
 
 /** Walk up the process tree from `pid` to the nearest Claude Code process with a registry entry. */
 export function findClaudePid(pid: number): number | undefined {
-  for (let p = pid, depth = 0; p > 1 && depth < 10; depth++) {
+  for (let p: number | undefined = pid, depth = 0; p && p > 1 && depth < 10; depth++) {
     if (existsSync(join(SESSIONS_DIR, `${p}.json`))) return p
-    try {
-      const stat = readFileSync(`/proc/${p}/stat`, 'utf8')
-      p = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
-    } catch {
-      return undefined
-    }
+    p = parentPid(p)
   }
   return undefined
 }

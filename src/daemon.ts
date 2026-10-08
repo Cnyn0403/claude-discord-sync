@@ -40,10 +40,12 @@ import { homedir } from 'os'
 import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
-import { scanSessions, findTranscript, JsonlTail, type LiveSession } from './sessions'
+import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
+import { IS_WIN, IS_LINUX, hasTmux } from './platform'
+import { keysToTmux, type Key } from './keys'
 
 const cfg = loadConfig()
 const STATE_FILE = join(STATE_DIR, 'state.json')
@@ -969,7 +971,7 @@ async function startNewSession(r: Replier, dirArg: string | undefined, prompt: s
     await r.reply(m.folderNotFound(dir))
     return
   }
-  await launchInTmux(r, dir, prompt ? [prompt.trim()] : [])
+  await launchSession(r, dir, prompt ? [prompt.trim()] : [])
 }
 
 /** `resume` for an ended session: `ccd --resume <id>` in tmux; the channel moves back when it registers. */
@@ -978,21 +980,95 @@ async function resumeSession(r: Replier, sessionId: string, st: SessionState) {
     await r.reply(m.folderNotFound(st.cwd))
     return
   }
-  await launchInTmux(r, st.cwd, ['--resume', sessionId])
+  await launchSession(r, st.cwd, ['--resume', sessionId], sessionId)
 }
 
-/** Run ccd with `args` in a detached tmux session and report its channel once it registers. */
-async function launchInTmux(r: Replier, dir: string, args: string[]) {
+/** A ccd started by /new or /resume, watched until it registers as a session. */
+type Launch = {
+  /** How the user can find it locally, e.g. tmux `ccd-ab12` */
+  name: string
+  hint: string
+  /** The current screen, plus `dead` (exit status) once the process is gone; undefined if it vanished. */
+  poll(): Promise<{ screen: string; dead?: string } | undefined>
+  press(key: 'Enter' | 'Down'): Promise<unknown>
+  owns(t: Tracked): boolean
+  registered(): Promise<unknown>
+}
+
+/** Detached tmux session (Linux, macOS). `exec` makes the pane's process Claude Code itself, so pane_pid identifies it. */
+async function startInTmux(dir: string, args: string[]): Promise<Launch> {
   const name = `ccd-${Math.random().toString(36).slice(2, 6)}`
-  const cmd = ['exec', CCD, ...args].map((a, i) => (i ? shq(a) : a)).join(' ')
-  // `exec` makes the pane's process Claude Code itself, so pane_pid identifies the session.
+  const cmd = ['exec', shq(CCD), ...args.map(shq)].join(' ')
   // remain-on-exit keeps the screen around if it dies during startup, so we can show why.
   const { stdout } = await run('tmux', [
     'new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', name, '-x', '200', '-y', '50', '-c', dir, cmd,
     ';', 'set-option', '-t', name, 'remain-on-exit', 'on',
   ])
   const panePid = Number(stdout.trim())
-  const status = await r.reply(m.starting(name))
+  return {
+    name: `tmux \`${name}\``,
+    hint: m.tmuxHint(name),
+    async poll() {
+      try {
+        const screen = (await run('tmux', ['capture-pane', '-p', '-t', name])).stdout
+        const dead = (await run('tmux', ['display-message', '-p', '-t', name, '#{pane_dead} #{pane_dead_status}'])).stdout.trim()
+        if (!dead.startsWith('1')) return { screen }
+        await run('tmux', ['kill-session', '-t', name]).catch(() => {})
+        return { screen, dead: dead.split(' ')[1] || '?' }
+      } catch {
+        return undefined
+      }
+    },
+    press: key => run('tmux', ['send-keys', '-t', name, key]),
+    owns: t => t.live?.pid === panePid,
+    registered: () => run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {}),
+  }
+}
+
+/** Quote one argument for the Windows command line (CommandLineToArgvW rules). */
+const winArg = (a: string) => '"' + a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"'
+const psq = (s: string) => `'${s.replace(/'/g, "''")}'`
+const samePath = (a: string, b: string) => (IS_WIN ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b))
+
+/**
+ * New console window (Windows, no tmux). Its screen is read and typed into by
+ * attaching to the console of the process we started. Claude Code is a child of
+ * that process, so it's recognised by folder and start time (or by ID on resume).
+ */
+async function startInConsole(dir: string, args: string[], resumeId?: string): Promise<Launch> {
+  const launchedAt = Date.now()
+  const ps = [
+    `$p = Start-Process -PassThru -FilePath ${psq(join(import.meta.dir, '..', 'bin', 'ccd.cmd'))} -WorkingDirectory ${psq(dir)}`,
+    args.length ? ` -ArgumentList ${psq(args.map(winArg).join(' '))}` : '',
+    '; $p.Id',
+  ].join('')
+  const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true })
+  const pid = Number(stdout.trim())
+  let last = ''
+  return {
+    name: `PID ${pid}`,
+    hint: m.windowHint,
+    async poll() {
+      if (!isAlive({ pid })) return { screen: last, dead: '?' }
+      const r = await winConsole('screen', pid)
+      if (r.ok && r.text !== undefined) last = r.text
+      return { screen: last }
+    },
+    press: key => winConsole('type', pid, [key]),
+    owns: t =>
+      !!t.live &&
+      (resumeId ? t.sessionId === resumeId : samePath(t.live.cwd, dir) && (t.live.startedAt ?? 0) >= launchedAt - 5000),
+    registered: async () => {},
+  }
+}
+
+/** Start ccd for /new or /resume, accept its startup dialogs, and report its channel once it registers. */
+async function launchSession(r: Replier, dir: string, args: string[], resumeId?: string) {
+  let l: Launch
+  if (hasTmux()) l = await startInTmux(dir, args)
+  else if (IS_WIN) l = await startInConsole(dir, args, resumeId)
+  else return void (await r.reply(m.needTmux))
+  const status = await r.reply(m.starting(l.name, l.hint))
 
   const answered = new Set<RegExp>()
   let downs = 0
@@ -1000,25 +1076,16 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
   let screen = ''
   while (Date.now() < deadline) {
     await Bun.sleep(1000)
-    const t = trackedByPid(panePid)
+    const t = [...tracked.values()].find(t => l.owns(t))
     if (t?.st.channelId) {
-      await run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {})
-      await status.edit(m.started(name, t.st.channelId))
+      await l.registered()
+      await status.edit(m.started(l.name, t.st.channelId, l.hint))
       return
     }
-    let dead: string
-    try {
-      screen = (await run('tmux', ['capture-pane', '-p', '-t', name])).stdout
-      dead = (await run('tmux', ['display-message', '-p', '-t', name, '#{pane_dead} #{pane_dead_status}'])).stdout.trim()
-    } catch {
-      await status.edit(m.tmuxGone(name))
-      return
-    }
-    if (dead.startsWith('1')) {
-      await run('tmux', ['kill-session', '-t', name]).catch(() => {})
-      await status.edit(m.startFailed(dead.split(' ')[1] || '?', screenBlock(screen)))
-      return
-    }
+    const p = await l.poll()
+    if (!p) return void (await status.edit(m.launchGone(l.name)))
+    screen = p.screen
+    if (p.dead !== undefined) return void (await status.edit(m.startFailed(p.dead, screenBlock(screen))))
     const prompt = STARTUP_PROMPTS.find(p => p.re.test(screen) && !answered.has(p.re))
     if (prompt) {
       const key = downs < 5 ? dialogKey(screen, prompt.accept) : 'Enter'
@@ -1028,7 +1095,7 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
       } else {
         downs++
       }
-      await run('tmux', ['send-keys', '-t', name, key])
+      await l.press(key)
     }
   }
   await status.edit(m.startTimeout(NEW_TIMEOUT_MS / 1000, screenBlock(screen)))
@@ -1055,8 +1122,13 @@ function clearStopFlag(t: Tracked) {
   t.stopFlag = false
 }
 
-/** The tmux pane Claude Code runs in, from its environment. */
+/** tmux panes reported by channel servers (from the TMUX / TMUX_PANE they inherit), by Claude Code PID. */
+const peerTmux = new Map<number, { socket: string; pane: string }>()
+
+/** The tmux pane Claude Code runs in: as its channel server reported, or (Linux) from its environment. */
 function tmuxPaneOf(pid: number): { socket: string; pane: string } | undefined {
+  const reported = peerTmux.get(pid)
+  if (reported || !IS_LINUX) return reported
   try {
     const env = new Map(
       readFileSync(`/proc/${pid}/environ`, 'utf8')
@@ -1071,7 +1143,7 @@ function tmuxPaneOf(pid: number): { socket: string; pane: string } | undefined {
   }
 }
 
-function typeViaPeer(peer: Socket, text: string): Promise<{ ok: boolean; error?: string }> {
+function typeViaPeer(peer: Socket, keys: Key[]): Promise<{ ok: boolean; error?: string }> {
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       interruptWaiters.delete(peer)
@@ -1082,31 +1154,43 @@ function typeViaPeer(peer: Socket, text: string): Promise<{ ok: boolean; error?:
       interruptWaiters.delete(peer)
       resolve(r)
     })
-    ipcSend(peer, { t: 'type', text })
+    ipcSend(peer, { t: 'type', keys })
   })
 }
 
+const WIN_CONSOLE = join(import.meta.dir, 'win-console.ts')
+
+/** Windows: attach to the process's console in a helper process and type there / read the screen. */
+async function winConsole(cmd: 'type' | 'screen', pid: number, keys?: Key[]): Promise<{ ok: boolean; error?: string; text?: string }> {
+  try {
+    const args = [WIN_CONSOLE, cmd, String(pid), ...(keys ? [JSON.stringify(keys)] : [])]
+    const { stdout } = await run(process.execPath, args, { windowsHide: true })
+    return JSON.parse(stdout.trim().split('\n').pop() ?? '{}')
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) }
+  }
+}
+
 /**
- * Type into the session: via tmux when it runs in tmux (`tmuxKeys` are send-keys
- * argument lists), otherwise through the channel server's terminal (`text`).
+ * Type into the session: via tmux when it runs in tmux, through its console on
+ * Windows, otherwise through the channel server's terminal (TIOCSTI).
  */
-async function typeInto(
-  pid: number,
-  peer: Socket | undefined,
-  text: string,
-  tmuxKeys: string[][],
-): Promise<{ via?: string; error?: string }> {
+async function typeInto(pid: number, peer: Socket | undefined, keys: Key[]): Promise<{ via?: string; error?: string }> {
   const tmux = tmuxPaneOf(pid)
   if (tmux) {
     try {
-      for (const keys of tmuxKeys) await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, ...keys])
+      for (const k of keysToTmux(keys)) await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, ...k])
       return { via: m.viaTmux }
     } catch (e: any) {
       return { error: e?.message ?? String(e) }
     }
   }
+  if (IS_WIN) {
+    const r = await winConsole('type', pid, keys)
+    return r.ok ? { via: m.viaTerminal } : { error: r.error }
+  }
   if (peer) {
-    const r = await typeViaPeer(peer, text)
+    const r = await typeViaPeer(peer, keys)
     return r.ok ? { via: m.viaTerminal } : { error: r.error }
   }
   return { error: m.noWayToType }
@@ -1115,7 +1199,7 @@ async function typeInto(
 /**
  * Press Esc in the session: via tmux when it runs in tmux, otherwise via the
  * channel server's terminal. If that fails or doesn't take, leave a flag for
- * stop-hook.sh to stop Claude before its next tool call.
+ * stop-hook.ts to stop Claude before its next tool call.
  */
 async function stopSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   if (t.live?.status !== 'busy') {
@@ -1124,7 +1208,7 @@ async function stopSession(t: Tracked, r: Replier, peer: Socket | undefined) {
     return
   }
   const pid = t.live.pid
-  const { via, error } = await typeInto(pid, peer, '\x1b', [['Escape']])
+  const { via, error } = await typeInto(pid, peer, ['Escape'])
   if (error) {
     if (!peer) {
       await r.reply(m.escFailed(error))
@@ -1150,14 +1234,14 @@ async function endSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   const pid = t.live?.pid
   if (!pid) return
   if (t.live?.status === 'busy') {
-    const { error } = await typeInto(pid, peer, '\x1b', [['Escape']])
+    const { error } = await typeInto(pid, peer, ['Escape'])
     if (error) {
       await r.reply(m.cantInterrupt(error))
       return
     }
     await Bun.sleep(1500)
   }
-  const { via, error } = await typeInto(pid, peer, '/exit\r', [['-l', '/exit'], ['Enter']])
+  const { via, error } = await typeInto(pid, peer, [{ text: '/exit' }, 'Enter'])
   if (error) {
     await r.reply(m.cantEnd(error))
     return
@@ -1257,19 +1341,21 @@ const SLASH_COMMANDS = [
 function dirSuggestions(typed: string): { name: string; value: string }[] {
   const out = new Set<string>()
   const expanded = expandHome(typed)
-  if (typed.includes('/')) {
-    const base = expanded.endsWith('/') ? expanded : dirname(expanded) + '/'
-    const prefix = expanded.endsWith('/') ? '' : basename(expanded)
+  // Either separator, so Windows paths (C:\Users\…) complete too.
+  if (/[\\/]/.test(typed)) {
+    const endsWithSep = /[\\/]$/.test(expanded)
+    const base = endsWithSep ? expanded : dirname(expanded)
+    const prefix = endsWithSep ? '' : basename(expanded)
     try {
       for (const e of readdirSync(base, { withFileTypes: true })) {
-        if (e.isDirectory() && !e.name.startsWith('.') && e.name.startsWith(prefix)) out.add(join(base, e.name))
+        if (e.isDirectory() && !e.name.startsWith('.') && e.name.toLowerCase().startsWith(prefix.toLowerCase())) out.add(join(base, e.name))
       }
     } catch {}
   }
   const recent = Object.values(state.sessions)
     .sort((a, b) => (b.endedAt ?? Number.MAX_SAFE_INTEGER) - (a.endedAt ?? Number.MAX_SAFE_INTEGER))
     .map(st => st.cwd)
-  for (const cwd of recent) if (cwd.includes(expanded)) out.add(cwd)
+  for (const cwd of recent) if (cwd.toLowerCase().includes(expanded.toLowerCase())) out.add(cwd)
   return [...out]
     .filter(d => d.length <= 100)
     .slice(0, 25)
@@ -1476,6 +1562,8 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
     self.pid = msg.claudePid
     peers.get(msg.claudePid)?.destroy()
     peers.set(msg.claudePid, sock)
+    if (msg.tmux) peerTmux.set(msg.claudePid, msg.tmux)
+    else peerTmux.delete(msg.claudePid)
     log(`channel server connected for pid ${msg.claudePid}`)
     const t = trackedByPid(msg.claudePid)
     if (t) await post(t, [m.channelConnected])
@@ -1523,7 +1611,8 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
 }
 
 function startIpc() {
-  rmSync(SOCKET_PATH, { force: true })
+  // Named pipes (Windows) vanish with the process; a stale Unix socket file has to be removed.
+  if (!IS_WIN) rmSync(SOCKET_PATH, { force: true })
   const server = createServer(sock => {
     const self: { pid?: number } = {}
     onLines<ClientMsg>(sock, m => void handlePeer(sock, m, self).catch(e => log('peer msg failed:', e?.message ?? e)))
@@ -1535,7 +1624,9 @@ function startIpc() {
     })
     sock.on('error', () => {})
   })
-  server.listen(SOCKET_PATH, () => chmodSync(SOCKET_PATH, 0o600))
+  server.listen(SOCKET_PATH, () => {
+    if (!IS_WIN) chmodSync(SOCKET_PATH, 0o600)
+  })
 }
 
 // ---- boot -----------------------------------------------------------------
@@ -1592,7 +1683,7 @@ client.on('error', e => log('client error:', e.message))
 
 function shutdown() {
   saveState()
-  rmSync(SOCKET_PATH, { force: true })
+  if (!IS_WIN) rmSync(SOCKET_PATH, { force: true })
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

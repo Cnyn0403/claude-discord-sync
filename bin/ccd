@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Launch Claude Code with the discord-sync channel loaded, so the session can
-# be driven from Discord. All arguments are passed through to `claude`.
-DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-BUN="$(command -v bun)"
-MCP="{\"mcpServers\":{\"discord-sync\":{\"command\":\"$BUN\",\"args\":[\"$DIR/src/channel-server.ts\"]}}}"
-# AskUserQuestion / ExitPlanMode are answered from Discord menus (falls back to the terminal on
-# timeout, DISCORD_SYNC_ASK_TIMEOUT seconds, default 600). stop-hook.sh is the
-# fallback for !stop when Esc can't be pressed.
-TIMEOUT=$(( ${DISCORD_SYNC_ASK_TIMEOUT:-600} + 30 ))
-SETTINGS="{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"AskUserQuestion|ExitPlanMode\",\"hooks\":[{\"type\":\"command\",\"command\":\"$BUN $DIR/src/ask-hook.ts\",\"timeout\":$TIMEOUT}]},{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$DIR/bin/stop-hook.sh\"}]}]}}"
-exec claude --mcp-config "$MCP" --settings "$SETTINGS" --dangerously-load-development-channels server:discord-sync "$@"
+# Launch Claude Code with the discord-sync channel and hooks loaded, so the
+# session can be driven from Discord. All arguments are passed through to
+# `claude`. The config (MCP server, hooks) comes from src/ccd.ts; exec keeps
+# Claude Code on this shell's PID, which /new relies on to find tmux sessions.
+# Resolve symlinks portably (macOS before 12.3 has no `readlink -f`).
+SRC="$0"
+while [ -L "$SRC" ]; do
+  LINK="$(readlink "$SRC")"
+  case "$LINK" in /*) SRC="$LINK" ;; *) SRC="$(dirname "$SRC")/$LINK" ;; esac
+done
+DIR="$(cd "$(dirname "$SRC")/.." && pwd)"
+CFG="$(bun "$DIR/src/ccd.ts" --write-config)" || exit 1
+exec claude --mcp-config "$CFG/mcp.json" --settings "$CFG/settings.json" \
+  --dangerously-load-development-channels server:discord-sync "$@"

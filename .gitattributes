@@ -1,0 +1,4 @@
+# Windows batch files need CRLF; the bash launcher must stay LF even on Windows checkouts.
+*.cmd text eol=crlf
+bin/ccd text eol=lf
+*.ts text eol=lf
