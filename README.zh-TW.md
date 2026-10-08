@@ -1,85 +1,133 @@
 # claude-discord-sync
 
-把本機所有 Claude Code session 同步到 Discord：每個 session 自動建立一個頻道，對話內容即時鏡像過去；用 `ccd` 啟動的 session 還可以直接在 Discord 上對話、按按鈕核准權限。
+[English](README.md) · **繁體中文**
+
+把本機每個 Claude Code session 同步到各自的 Discord 頻道，並且能從 Discord 操作 session：跟 Claude 對話、用下拉選單回答它的問題、用按鈕核准計畫和權限、中斷它，也能用手機開新 session、結束或恢復 session。
+
+> 這是非官方的社群專案，跟 Anthropic 沒有關係。它用到 Claude Code 的 *channels* 功能（research preview）和 Claude Code 內部的 session 檔案，所以 Claude Code 更新後可能會壞掉。
+>
+> Discord 上的文字（按鈕、狀態訊息、頻道名稱）目前是繁體中文。
 
 ```
- Discord guild                       本機
- ┌──────────────────────┐   ┌────────────────────────────────────────────┐
- │ 📁 Claude Sessions    │   │ daemon.ts（唯一的 bot 連線）                │
- │   #proj-15ab  ◀───────┼───┤  ├ 監看 ~/.claude/sessions/*.json → 建頻道  │
- │   #web-ffe3           │   │  ├ tail transcript JSONL → 貼到頻道         │
- │ 📁 …(ended)           │   │  └ Unix socket ◀─┐                          │
- └──────────────────────┘   │                  │                          │
-                            │ channel-server.ts（每個 ccd session 一個）   │
-                            │  └ MCP channel：Discord 訊息 / 權限 ⇄ session │
-                            └────────────────────────────────────────────┘
+ Discord guild                        本機
+ ┌───────────────────────┐   ┌──────────────────────────────────────────────┐
+ │ 📁 Claude Sessions     │   │ daemon.ts（唯一的 bot 連線）                  │
+ │   #claude-控制台       │   │  ├ 監看 ~/.claude/sessions/*.json            │
+ │   #proj-15ab  ◀────────┼───┤  ├ 讀取 transcript JSONL → 貼到頻道          │
+ │   #web-ffe3            │   │  └ Unix socket ◀──┐                          │
+ │   🗂️ 封存論壇          │   │                   │                          │
+ └───────────────────────┘   │ channel-server.ts（每個 ccd session 一個）    │
+                             │  └ MCP channel：Discord ⇄ Claude Code         │
+                             │ ask-hook.ts / stop-hook.sh（ccd 掛的 hook）   │
+                             └──────────────────────────────────────────────┘
 ```
 
-## 運作方式
+## 功能
 
-| 功能 | 機制 |
-|---|---|
-| 偵測 session | Claude Code 會把每個執行中的 session 寫進 `~/.claude/sessions/<pid>.json`。daemon 每 1.5 秒掃描一次，並確認 PID 還活著 |
-| 本地 → Discord | 持續讀取 `~/.claude/projects/<dir>/<session>.jsonl`，把使用者輸入、Claude 回覆、工具呼叫摘要貼到頻道 |
-| Discord → 本地 | `ccd` 會載入 `channel-server.ts`（Claude Code 的 channels 功能），訊息以 `<channel source="discord-sync">` 的形式送進 session |
-| 權限核准 | channel 的 permission relay：在頻道貼出附「允許 / 拒絕」按鈕的訊息並 @ 你，也可以回覆 `yes abcde` |
-| 計畫確認 | 同一個 hook 也會攔截 `ExitPlanMode`：頻道貼出計畫和「核准 / 繼續修改 / 改在終端機回答」按鈕，「繼續修改」會跳出文字框，內容會當成修改意見交回 Claude。計畫太長時訊息只放預覽，完整內容附成 `plan.md` |
-| 完成通知 | Claude 工作超過 `notifyMinBusySec` 秒後回到閒置時，貼一則「✅ Claude 完成了」並 @ 你 |
-| 長回覆 | 超過 `attachOver` 字的回覆只貼預覽，全文附成 `reply.md` |
-| 開新 session | 在 guild 任一頻道輸入 `!new <資料夾> [第一句話]`，daemon 會在背景 tmux 裡執行 `ccd`，並自動接受開發者 channel、信任資料夾這兩個啟動確認畫面（會把游標移到「Yes」再按 Enter）。如果啟動失敗，會把 tmux 最後的畫面貼回頻道。頻道建立後會回覆連結，本機可以用 `tmux attach -t ccd-xxxx` 接手 |
-| 中斷 | 在 session 頻道輸入 `!stop`：session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude 的終端機。如果送不出 Esc，或 4 秒後 Claude 還在工作，就改用 `bin/stop-hook.sh` 這個 PreToolUse hook，在 Claude 下一次使用工具前停止 |
-| 結束 / 恢復 | 在 session 頻道輸入 `!end`：Claude 在工作的話先中斷，再輸入 `/exit`（方式跟 `!stop` 一樣，tmux 或 `TIOCSTI`）。在已結束的頻道輸入 `!resume`，會在 tmux 裡執行 `ccd --resume <session ID>`，頻道移回原分類後繼續同步 |
-| 選擇題 | `ccd` 會掛一個 `AskUserQuestion` 的 PreToolUse hook（`src/ask-hook.ts`）：daemon 在頻道貼出下拉選單並 @ 你，選完後答案經由 `updatedInput.answers` 交回 Claude。選單裡有「其他（自己輸入）」可以開文字框；按「改在終端機回答」或逾時（`DISCORD_SYNC_ASK_TIMEOUT` 秒，預設 600）就回到本地對話框 |
-| 狀態 | Claude 工作中時頻道會顯示「正在輸入…」；session 結束後頻道移到「Claude Sessions (ended)」分類，用 `--resume` 回來時會移回原分類 |
+- **每個 session 一個頻道。** 每個執行中的 Claude Code session 都有自己的頻道，你的輸入、Claude 的回覆和工具呼叫摘要都會即時同步。太長的回覆只貼預覽，全文附成 `.md` 檔。
+- **雙向對話：** 用 `ccd`（`claude` 的包裝指令）啟動的 session，在頻道裡傳的訊息和附件都會送給 Claude。
+- **選擇題和計畫變成按鈕：** `AskUserQuestion` 會變成下拉選單，可以選「其他」自己輸入；`ExitPlanMode` 會變成「核准 / 繼續修改 / 改在終端機回答」按鈕。
+- **權限請求**會附「允許 / 拒絕」按鈕並 @ 你。
+- **完成通知：** Claude 做完一段較久的工作時會 @ 你。
+- **控制 session：** `/new`、`/stop`、`/end`、`/resume`（也可以用 `!new`、`!stop`…）。開新的或恢復的 session 會在背景的 tmux 裡執行，本機可以用 `tmux attach` 接手。
+- **控制台頻道：** 列出所有 session 的狀態，附「中斷 / 結束 / 恢復」選單和開新 session 的按鈕。
+- **論壇封存：** session 結束後會變成一篇論壇貼文，附完整對話和「恢復」按鈕。伺服器不能建立論壇時，會改用封存分類。
+- **自動清理：** 封存超過設定天數的 session 會被刪除。
+
+## 需求
+
+- Linux（用到 `/proc` 和 `TIOCSTI`）
+- [Bun](https://bun.sh)
+- 支援 channels 的 [Claude Code](https://claude.com/claude-code)
+- tmux（`/new` 和 `/resume` 需要）
+- 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)）
 
 ## 安裝
 
-需要 [Bun](https://bun.sh)；`!new` 另外需要 tmux。
+### 1. 建立 bot
+
+到 [Discord Developer Portal](https://discord.com/developers/applications)：
+
+1. 建立一個 application 並加入 bot，複製它的 token。
+2. 在 *Bot* 頁面開啟 **Message Content Intent**。
+3. 邀請 bot 時勾選 `bot` 和 `applications.commands` 兩個 scope，以及這些權限：Manage Channels、Manage Threads、Send Messages、Add Reactions、Attach Files、Read Message History。
+
+### 2. 安裝
 
 ```bash
+git clone https://github.com/Cnyn0403/claude-discord-sync.git ~/claude-discord-sync
 cd ~/claude-discord-sync
 bun install
-bun src/doctor.ts          # 唯讀檢查：bot 登入、guild 權限、目前的 session
+
+mkdir -p ~/.claude/channels/discord-sync
+echo 'DISCORD_BOT_TOKEN=你的 token' > ~/.claude/channels/discord-sync/.env
+chmod 600 ~/.claude/channels/discord-sync/.env
 ```
 
-**Bot token**：依序讀取 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discord-sync/.env`、官方 discord 外掛的 `~/.claude/channels/discord/.env`。如果已經設定過官方外掛，就不用另外設定。
+建立 `~/.claude/channels/discord-sync/config.json`，至少要填你的 Discord user ID。取得方式：設定 → 進階 → 開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。
 
-**Bot 權限**：需要 Manage Channels、Send Messages、Add Reactions、Attach Files，並在 Developer Portal 開啟 **Message Content Intent**。
+```json
+{ "allowFrom": ["你的 Discord user ID"] }
+```
 
-### 啟動 daemon
+檢查設定（唯讀，不會改任何東西）：
 
 ```bash
-bun src/daemon.ts                      # 前景執行
+bun src/doctor.ts
+```
 
-# 或註冊成 systemd 使用者服務，開機自動啟動
+token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discord-sync/.env`、官方 Discord 外掛的 `~/.claude/channels/discord/.env` 讀取。如果你已經在用官方外掛，會直接沿用它的 token 和 `allowFrom`。
+
+### 3. 啟動 daemon
+
+```bash
+bun src/daemon.ts            # 前景執行
+
+# 或註冊成 systemd 使用者服務（路徑不同的話，請修改 unit 檔裡的路徑）
 mkdir -p ~/.config/systemd/user
 cp contrib/claude-discord-sync.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now claude-discord-sync
-journalctl --user -u claude-discord-sync -f   # 看 log
+journalctl --user -u claude-discord-sync -f
 ```
 
-### 用可以雙向對話的模式開 Claude Code
+### 4. 用 `ccd` 啟動 Claude Code
 
 ```bash
 ln -s ~/claude-discord-sync/bin/ccd ~/.local/bin/ccd
-ccd                 # 等同 claude，可以加任何參數，例如 ccd --resume
+ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd --resume
 ```
 
-啟動時 Claude Code 會跳出一次 development channel 的確認畫面（目前 channels 還在 research preview 階段，自製的 channel 都需要這個旗標）。
+`ccd` 會載入 discord-sync 的 channel 和 hook。啟動時 Claude Code 會要你確認 development channel，因為自製的 channel 目前還是 research preview。
 
 用一般 `claude` 啟動的 session 一樣會被同步，只是在 Discord 上是唯讀的。
 
-## 設定（選用）
+## 指令
 
-`~/.claude/channels/discord-sync/config.json`：
+| 指令 | 在哪裡用 | 作用 |
+|---|---|---|
+| `/new <資料夾> [第一句話]` | 任何頻道 | 在 tmux 裡用 `ccd` 開新 session。資料夾欄位會提示子資料夾和最近用過的資料夾 |
+| `/stop` | session 頻道 | 中斷目前的工作（按 Esc） |
+| `/end` | session 頻道 | 工作中的話先中斷，再 `/exit` |
+| `/resume` | 封存貼文或已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，並建立新頻道 |
+| `/migrate` | 任何頻道 | 把用分類封存的舊頻道搬到論壇 |
+| `yes abcde` / `no abcde` | session 頻道 | 用代碼回答權限請求 |
+
+每個指令都可以改用 `!new`、`!stop` 這種寫法。
+
+## 設定
+
+`~/.claude/channels/discord-sync/config.json`（除了 `allowFrom` 都是選填）：
 
 ```json
 {
   "guildId": "123456789012345678",
   "allowFrom": ["你的 Discord user ID"],
   "categoryName": "Claude Sessions",
+  "consoleChannelName": "claude-控制台",
+  "archiveForumName": "claude-已結束",
   "archiveCategoryName": "Claude Sessions (ended)",
+  "deleteEndedAfterDays": 7,
   "kinds": ["interactive"],
   "backlog": 15,
   "showToolCalls": true,
@@ -88,19 +136,53 @@ ccd                 # 等同 claude，可以加任何參數，例如 ccd --resum
 }
 ```
 
-- `guildId`：bot 只在一個 guild 時會自動偵測。
-- `allowFrom`：預設沿用官方外掛 `access.json` 的 `allowFrom`。**只有這些人能對 session 下指令或核准權限**，其他人的訊息會被標上 🚫 並忽略。
-- `archiveCategoryName`：設成 `""` 表示 session 結束後不移動頻道。
-- `backlog`：daemon 啟動時遇到已經在跑的 session，最多補貼多少則歷史訊息。
-- `notifyMinBusySec`：Claude 至少工作幾秒才會發完成通知；設成 `-1` 表示關閉。
-- `attachOver`：回覆超過幾個字就改成預覽加附檔。
+| 設定 | 說明 |
+|---|---|
+| `guildId` | 要用的伺服器。bot 只在一個伺服器時會自動偵測 |
+| `allowFrom` | 可以對 session 說話、按按鈕、下指令的 Discord user ID，其他人會被標上 🚫 |
+| `categoryName` | session 頻道所在的分類 |
+| `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立 |
+| `archiveForumName` | 封存用的論壇；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |
+| `archiveCategoryName` | 沒用論壇時的封存分類；設成 `""` 就讓頻道留在原地 |
+| `deleteEndedAfterDays` | 封存幾天後刪除；設成 `0` 就永遠保留 |
+| `kinds` | 要同步的 session 類型，對應 `~/.claude/sessions/<pid>.json` 裡的 `kind` |
+| `backlog` | 為已經在跑的 session 建頻道時，最多補貼幾則舊訊息 |
+| `showToolCalls` | 是否貼出工具呼叫的一行摘要 |
+| `notifyMinBusySec` | 工作至少幾秒才發完成通知；設成 `-1` 就關閉 |
+| `attachOver` | 回覆超過幾個字就改成附檔 |
 
-狀態檔 `state.json`（session ↔ 頻道對應、讀取進度）也在同一個資料夾，daemon 重啟後會從上次的位置繼續，不會重複貼文。
+環境變數 `DISCORD_SYNC_ASK_TIMEOUT`（秒，預設 600）決定選擇題或計畫在 Discord 上等多久，逾時就回到終端機作答。
+
+同一個資料夾裡的 `state.json` 記錄每個 session 對應哪個頻道、對話紀錄讀到哪裡，所以 daemon 重啟後不會重複貼文。
+
+## 運作方式
+
+| 部分 | 機制 |
+|---|---|
+| 偵測 session | Claude Code 會把每個執行中的 session 寫進 `~/.claude/sessions/<pid>.json`。daemon 每 1.5 秒掃描一次，並確認 PID 還活著 |
+| 本機 → Discord | 持續讀取 `~/.claude/projects/<dir>/<session>.jsonl`，轉成使用者輸入、回覆和工具呼叫（`src/render.ts`） |
+| Discord → 本機 | `ccd` 會把 `channel-server.ts` 當成 Claude Code 的 channel 載入，訊息以 `<channel source="discord-sync">` 的形式送進 session |
+| 權限 | channel 的 permission relay 會貼出「允許 / 拒絕」按鈕 |
+| 選擇題和計畫 | `AskUserQuestion` 和 `ExitPlanMode` 的 `PreToolUse` hook（`src/ask-hook.ts`）會請 daemon 貼出選單或按鈕，再透過 `updatedInput.answers` 交回答案，或是帶著意見允許／拒絕 |
+| 中斷 | session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude Code 的終端機。兩者都不行時，`bin/stop-hook.sh` 會在 Claude 下一次使用工具前停下它 |
+| 開新 / 恢復 | 用 `tmux new-session` 執行 `ccd`，自動接受啟動時的確認畫面（development channel、信任資料夾）；啟動失敗時會把最後的畫面貼回來 |
+| 刪除頻道 | 執行中 session 的頻道被刪掉時，會自動重建並補貼最近的訊息。封存貼文或已結束的頻道被刪掉時，會把 session 從清單移除 |
+
+## 安全性
+
+**`allowFrom` 裡的人都能透過 Claude 在你的電腦上執行指令。** 請讓伺服器保持私人，allowlist 越短越好。
+
+- 從 Discord 開 session 時，會自動接受 Claude Code 對該資料夾的信任確認。
+- bot token 以明文存在 `~/.claude/channels/discord-sync/.env`，請保持 `chmod 600`。
+- 你在 Discord 上傳的檔案會存到 `~/.claude/channels/discord-sync/inbox/`。
 
 ## 已知限制
 
-- transcript 的 JSONL 格式是 Claude Code 的內部格式，改版後可能需要調整 `src/render.ts`。
-- `ccd` session 的選擇題在 Discord 等待作答期間，本地終端機不會出現對話框；要在本地回答，請在 Discord 按「改在終端機回答」或等待逾時。用一般 `claude` 啟動的 session 仍然只能在本地作答。
-- `!stop` 的 `TIOCSTI` 方式在 Linux 6.2 以後的核心可能被關閉（`dev.tty.legacy_tiocsti=0`），這時只能靠 tmux 或 stop hook。stop hook 停不下正在跑的長指令，只會在下一次使用工具前生效。
-- `/clear` 會產生新的 session ID，所以會開一個新頻道，舊頻道會被歸檔。
-- 安全性：在 allowlist 裡的人，等於能在這台機器上透過 Claude 執行指令。guild 請保持私人。
+- transcript 的 JSONL 格式是 Claude Code 的內部格式，可能會變動，到時候 `src/render.ts` 需要跟著調整。
+- `ccd` 的選擇題或計畫在 Discord 等待回答時，終端機不會出現對話框。要在本機回答，請在 Discord 按「改在終端機回答」，或等待逾時。
+- 很多 Linux 6.2 以後的核心預設關閉 `TIOCSTI`（`dev.tty.legacy_tiocsti=0`）。這時 `/stop` 只對 tmux 裡的 session 有效，否則只能靠 stop hook，而它停不下正在跑的長指令。
+- `/clear` 會產生新的 session ID，所以會開一個新頻道，舊的會被封存。
+
+## 授權
+
+[MIT](LICENSE)
