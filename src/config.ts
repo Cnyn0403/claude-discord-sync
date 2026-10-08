@@ -66,14 +66,29 @@ function readJson<T>(path: string): T | undefined {
   }
 }
 
+export const CONFIG_FILE = join(STATE_DIR, 'config.json')
+export const ENV_FILE = join(STATE_DIR, '.env')
+
+/** The bot token from the environment, our .env, or the official plugin's .env. */
+export function findToken(): string | undefined {
+  // || rather than ??: an empty value (e.g. an unfilled .env.example copy) falls through.
+  return (
+    process.env.DISCORD_BOT_TOKEN ||
+    readEnvFile(ENV_FILE).DISCORD_BOT_TOKEN ||
+    readEnvFile(join(OFFICIAL_DIR, '.env')).DISCORD_BOT_TOKEN ||
+    undefined
+  )
+}
+
+/** config.json as written, without defaults. */
+export function readConfigFile(): Partial<Config> {
+  return readJson<Partial<Config>>(CONFIG_FILE) ?? {}
+}
+
 export function loadConfig(): Config {
   mkdirSync(STATE_DIR, { recursive: true })
-  const file = readJson<Partial<Config>>(join(STATE_DIR, 'config.json')) ?? {}
-  const token =
-    // || rather than ??: an empty value (e.g. an unfilled .env.example copy) falls through.
-    process.env.DISCORD_BOT_TOKEN ||
-    readEnvFile(join(STATE_DIR, '.env')).DISCORD_BOT_TOKEN ||
-    readEnvFile(join(OFFICIAL_DIR, '.env')).DISCORD_BOT_TOKEN
+  const file = readConfigFile()
+  const token = findToken()
   if (!token) {
     throw new Error(`DISCORD_BOT_TOKEN not found (env, ${join(STATE_DIR, '.env')}, or ${join(OFFICIAL_DIR, '.env')})`)
   }

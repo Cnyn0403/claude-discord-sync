@@ -37,10 +37,9 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 ## Requirements
 
 - Linux, macOS, or Windows 10/11 (see [Platform support](#platform-support))
-- [Bun](https://bun.sh)
 - [Claude Code](https://claude.com/claude-code) with channels support
 - tmux for `/new` and `/resume` on Linux and macOS (`brew install tmux`, `apt install tmux`)
-- A Discord bot in a **private** server (see [Security](#security))
+- A Discord bot in a **private** server (see [Security](#security)); setup walks you through creating one
 
 ## Platform support
 
@@ -49,74 +48,65 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 | Mirroring, chat, questions, plans, permissions, console, archive | ✅ | ✅ | ✅ |
 | `/stop`, `/end` | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
 | `/new`, `/resume` | tmux | tmux | opens a new console window (**experimental**) |
-| Run the daemon at login | systemd unit in `contrib/` | launchd / login item | Task Scheduler / Startup folder |
+| Daemon at login (set up by `setup`) | systemd user unit | launchd agent | Startup folder |
 
 Linux is the tested platform. macOS and Windows support is new; please [open an issue](https://github.com/Cnyn0403/claude-discord-sync/issues) if something doesn't work. On every platform, `/stop` falls back to stopping Claude before its next tool call when keys can't be typed.
 
-## Setup
+## Install
 
-### 1. Create the bot
-
-In the [Discord Developer Portal](https://discord.com/developers/applications):
-
-1. Create an application and add a bot. Copy its token.
-2. Under *Bot*, enable **Message Content Intent**.
-3. Invite it with the `bot` and `applications.commands` scopes and these permissions: Manage Channels, Manage Threads, Send Messages, Add Reactions, Attach Files, Read Message History.
-
-### 2. Install
+**macOS / Linux:**
 
 ```bash
-git clone https://github.com/Cnyn0403/claude-discord-sync.git ~/claude-discord-sync
-cd ~/claude-discord-sync
+curl -fsSL https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.ps1 | iex
+```
+
+The installer downloads a single executable for your platform (no Bun or Node needed), checks its SHA-256 against the release, and starts `claude-discord-sync setup`, which:
+
+1. Walks you through creating the bot, then asks for its token (hidden while you type) and checks it with Discord, including **Message Content Intent**.
+2. Prints an invite link and waits for the bot to join your server.
+3. Asks for your Discord user ID (only you can control sessions) and the language.
+4. Installs the `ccd` command.
+5. Starts the daemon now and at every login.
+
+Then open a new terminal and start Claude Code with `ccd` instead of `claude`:
+
+```bash
+ccd                 # all arguments pass through, e.g. ccd --resume
+```
+
+Claude Code asks you to confirm the development channel on startup, because custom channels are a research preview. Sessions started with plain `claude` are still mirrored, but read-only on Discord.
+
+| | |
+|---|---|
+| Check the setup (read-only) | `claude-discord-sync doctor` |
+| Change settings | run `claude-discord-sync setup` again, or edit `~/.claude/channels/discord-sync/config.json` |
+| Update | run the install command again |
+| Uninstall | `claude-discord-sync uninstall` (removes autostart and `ccd`, keeps your config) |
+
+The executables are not code-signed. If Windows SmartScreen or macOS Gatekeeper complains, that's why; the installer verifies the checksum of what it downloaded.
+
+### From source
+
+For development, or a platform without a prebuilt executable. Needs [Bun](https://bun.sh).
+
+```bash
+git clone https://github.com/Cnyn0403/claude-discord-sync.git
+cd claude-discord-sync
 bun install
-
-mkdir -p ~/.claude/channels/discord-sync
-cp .env.example ~/.claude/channels/discord-sync/.env
-chmod 600 ~/.claude/channels/discord-sync/.env
-# edit it and paste your bot token after DISCORD_BOT_TOKEN=
+bun src/cli.ts setup        # same wizard; ccd then points at bin/ccd in this checkout
 ```
 
-Create `~/.claude/channels/discord-sync/config.json` with at least your Discord user ID (Settings → Advanced → Developer Mode, then right-click your name → *Copy User ID*). [`config.example.json`](config.example.json) lists every option; the minimum is:
-
-```json
-{ "allowFrom": ["your Discord user ID"] }
-```
-
-Check the setup (read-only):
-
-```bash
-bun src/doctor.ts
-```
+Or configure by hand: copy [`.env.example`](.env.example) to `~/.claude/channels/discord-sync/.env` and fill in the token, create `config.json` from [`config.example.json`](config.example.json) (at least `allowFrom`), run `bun src/cli.ts daemon`, and start sessions with `bin/ccd` (`bin\ccd.cmd` on Windows).
 
 The token is read from `DISCORD_BOT_TOKEN`, then `~/.claude/channels/discord-sync/.env`, then the official Discord plugin's `~/.claude/channels/discord/.env`. If you already use the official plugin, its token and `allowFrom` are reused.
 
-### 3. Run the daemon
-
-```bash
-bun src/daemon.ts            # foreground
-
-# or as a systemd user service (edit the paths in the unit file if needed)
-mkdir -p ~/.config/systemd/user
-cp contrib/claude-discord-sync.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now claude-discord-sync
-journalctl --user -u claude-discord-sync -f
-```
-
-### 4. Start Claude Code with `ccd`
-
-Linux and macOS:
-
-```bash
-ln -s ~/claude-discord-sync/bin/ccd ~/.local/bin/ccd
-ccd                 # same as `claude`; all arguments pass through, e.g. ccd --resume
-```
-
-Windows (PowerShell or cmd): add the repo's `bin` folder to your `PATH`, then run `ccd` the same way. It runs `bin\ccd.cmd`.
-
-`ccd` loads the discord-sync channel and its hooks. Claude Code asks you to confirm the development channel on startup, because custom channels are a research preview.
-
-Sessions started with plain `claude` are still mirrored, but read-only on Discord.
+To build the executables yourself: `bun build --compile --target=bun-<os>-<arch> src/cli.ts`. Pushing a `v*` tag builds and publishes all of them with GitHub Actions.
 
 ## Commands
 

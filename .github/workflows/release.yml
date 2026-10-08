@@ -1,0 +1,55 @@
+# Push a tag like v0.2.0 to build every platform's executable and publish a release.
+# Tags with a hyphen (v0.2.0-beta.1) become prereleases.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: bun-linux-x64, asset: claude-discord-sync-linux-x64 }
+          - { os: ubuntu-latest, target: bun-linux-arm64, asset: claude-discord-sync-linux-arm64 }
+          - { os: ubuntu-latest, target: bun-windows-x64, asset: claude-discord-sync-windows-x64.exe }
+          # Built on macOS so they can be signed; Apple Silicon refuses to run unsigned binaries.
+          - { os: macos-latest, target: bun-darwin-arm64, asset: claude-discord-sync-darwin-arm64 }
+          - { os: macos-latest, target: bun-darwin-x64, asset: claude-discord-sync-darwin-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun build --compile --minify --target=${{ matrix.target }} src/cli.ts --outfile dist/${{ matrix.asset }}
+      - name: Ad-hoc sign
+        if: runner.os == 'macOS'
+        run: codesign --sign - --force dist/${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum claude-discord-sync-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags="--generate-notes"
+          case "$GITHUB_REF_NAME" in *-*) flags="$flags --prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" $flags

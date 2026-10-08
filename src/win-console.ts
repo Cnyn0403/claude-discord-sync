@@ -10,7 +10,10 @@
 import { dlopen, FFIType, ptr } from 'bun:ffi'
 import type { Key } from './keys'
 
-const k32 = dlopen('kernel32.dll', {
+// Loaded on first use, so a failure surfaces as the JSON error below.
+let k32Lib: ReturnType<typeof loadKernel32> | undefined
+const k32Proxy = () => (k32Lib ??= loadKernel32())
+const loadKernel32 = () => dlopen('kernel32.dll', {
   FreeConsole: { args: [], returns: FFIType.i32 },
   AttachConsole: { args: [FFIType.u32], returns: FFIType.i32 },
   GetLastError: { args: [], returns: FFIType.u32 },
@@ -21,6 +24,7 @@ const k32 = dlopen('kernel32.dll', {
   GetConsoleScreenBufferInfo: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
   ReadConsoleOutputCharacterW: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
 }).symbols
+const k32 = new Proxy({} as ReturnType<typeof loadKernel32>, { get: (_, k) => (k32Proxy() as any)[k] })
 
 const GENERIC_READ = 0x80000000
 const GENERIC_WRITE = 0x40000000

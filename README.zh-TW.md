@@ -37,10 +37,9 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 ## 需求
 
 - Linux、macOS 或 Windows 10/11（見[平台支援](#平台支援)）
-- [Bun](https://bun.sh)
 - 支援 channels 的 [Claude Code](https://claude.com/claude-code)
 - Linux 和 macOS 上的 `/new`、`/resume` 需要 tmux（`brew install tmux`、`apt install tmux`）
-- 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)）
+- 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)），安裝精靈會一步一步帶你建立
 
 ## 平台支援
 
@@ -49,74 +48,65 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 | 同步、對話、選擇題、計畫、權限、控制台、封存 | ✅ | ✅ | ✅ |
 | `/stop`、`/end` | tmux 或 `TIOCSTI` | tmux 或透過系統內建 Perl 的 `TIOCSTI` | 把按鍵送進 session 的主控台（**實驗性**） |
 | `/new`、`/resume` | tmux | tmux | 開一個新的主控台視窗（**實驗性**） |
-| 開機自動啟動 daemon | `contrib/` 裡的 systemd unit | launchd／登入項目 | 工作排程器／啟動資料夾 |
+| 開機自動啟動 daemon（由 `setup` 設定） | systemd 使用者服務 | launchd agent | 啟動資料夾 |
 
 Linux 是測試過的平台，macOS 和 Windows 是新加入的支援，遇到問題請[開 issue](https://github.com/Cnyn0403/claude-discord-sync/issues)。不論哪個平台，按鍵送不出去時，`/stop` 都會改成在 Claude 下一次使用工具前停止。
 
 ## 安裝
 
-### 1. 建立 bot
-
-到 [Discord Developer Portal](https://discord.com/developers/applications)：
-
-1. 建立一個 application 並加入 bot，複製它的 token。
-2. 在 *Bot* 頁面開啟 **Message Content Intent**。
-3. 邀請 bot 時勾選 `bot` 和 `applications.commands` 兩個 scope，以及這些權限：Manage Channels、Manage Threads、Send Messages、Add Reactions、Attach Files、Read Message History。
-
-### 2. 安裝
+**macOS／Linux：**
 
 ```bash
-git clone https://github.com/Cnyn0403/claude-discord-sync.git ~/claude-discord-sync
-cd ~/claude-discord-sync
+curl -fsSL https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.sh | sh
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+irm https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.ps1 | iex
+```
+
+安裝程式會下載你的平台專用的單一執行檔（不需要 Bun 或 Node），用 release 的 SHA-256 驗證檔案，再啟動安裝精靈 `claude-discord-sync setup`：
+
+1. 帶你建立 bot，然後輸入 token（輸入時不會顯示），並向 Discord 驗證，包括有沒有開啟 **Message Content Intent**。
+2. 顯示邀請連結，等 bot 加入你的伺服器。
+3. 詢問你的 Discord user ID（只有你能操作 session）和介面語言。
+4. 安裝 `ccd` 指令。
+5. 立刻啟動 daemon，並設定每次登入時自動啟動。
+
+完成後開一個新的終端機，用 `ccd` 取代 `claude` 啟動 Claude Code：
+
+```bash
+ccd                 # 所有參數都會傳過去，例如 ccd --resume
+```
+
+啟動時 Claude Code 會要你確認 development channel，因為自製的 channel 目前還是 research preview。用一般 `claude` 啟動的 session 一樣會被同步，只是在 Discord 上是唯讀的。
+
+| | |
+|---|---|
+| 檢查設定（唯讀） | `claude-discord-sync doctor` |
+| 修改設定 | 再執行一次 `claude-discord-sync setup`，或直接編輯 `~/.claude/channels/discord-sync/config.json` |
+| 更新 | 再執行一次安裝指令 |
+| 解除安裝 | `claude-discord-sync uninstall`（移除自動啟動和 `ccd`，保留你的設定） |
+
+執行檔沒有程式碼簽章，所以 Windows SmartScreen 或 macOS Gatekeeper 可能會跳出警告；安裝程式已經驗證過下載檔案的 checksum。
+
+### 從原始碼安裝
+
+適合開發，或是沒有預先編譯好執行檔的平台。需要 [Bun](https://bun.sh)。
+
+```bash
+git clone https://github.com/Cnyn0403/claude-discord-sync.git
+cd claude-discord-sync
 bun install
-
-mkdir -p ~/.claude/channels/discord-sync
-cp .env.example ~/.claude/channels/discord-sync/.env
-chmod 600 ~/.claude/channels/discord-sync/.env
-# 編輯這個檔案，把 bot token 貼在 DISCORD_BOT_TOKEN= 後面
+bun src/cli.ts setup        # 一樣的安裝精靈；ccd 會指向這個資料夾裡的 bin/ccd
 ```
 
-建立 `~/.claude/channels/discord-sync/config.json`，至少要填你的 Discord user ID，所有選項可以參考 [`config.example.json`](config.example.json)。取得方式：設定 → 進階 → 開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。
-
-```json
-{ "language": "zh-TW", "allowFrom": ["你的 Discord user ID"] }
-```
-
-檢查設定（唯讀，不會改任何東西）：
-
-```bash
-bun src/doctor.ts
-```
+也可以手動設定：把 [`.env.example`](.env.example) 複製到 `~/.claude/channels/discord-sync/.env` 並填入 token，參考 [`config.example.json`](config.example.json) 建立 `config.json`（至少要有 `allowFrom`），執行 `bun src/cli.ts daemon`，再用 `bin/ccd`（Windows 用 `bin\ccd.cmd`）啟動 session。
 
 token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discord-sync/.env`、官方 Discord 外掛的 `~/.claude/channels/discord/.env` 讀取。如果你已經在用官方外掛，會直接沿用它的 token 和 `allowFrom`。
 
-### 3. 啟動 daemon
-
-```bash
-bun src/daemon.ts            # 前景執行
-
-# 或註冊成 systemd 使用者服務（路徑不同的話，請修改 unit 檔裡的路徑）
-mkdir -p ~/.config/systemd/user
-cp contrib/claude-discord-sync.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now claude-discord-sync
-journalctl --user -u claude-discord-sync -f
-```
-
-### 4. 用 `ccd` 啟動 Claude Code
-
-Linux 和 macOS：
-
-```bash
-ln -s ~/claude-discord-sync/bin/ccd ~/.local/bin/ccd
-ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd --resume
-```
-
-Windows（PowerShell 或 cmd）：把 repo 裡的 `bin` 資料夾加進 `PATH`，之後一樣輸入 `ccd`，會執行 `bin\ccd.cmd`。
-
-`ccd` 會載入 discord-sync 的 channel 和 hook。啟動時 Claude Code 會要你確認 development channel，因為自製的 channel 目前還是 research preview。
-
-用一般 `claude` 啟動的 session 一樣會被同步，只是在 Discord 上是唯讀的。
+自己編譯執行檔：`bun build --compile --target=bun-<os>-<arch> src/cli.ts`。推送 `v*` 開頭的 tag，GitHub Actions 會自動編譯所有平台並發布。
 
 ## 指令
 

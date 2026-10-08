@@ -2,21 +2,22 @@
 /**
  * Launch Claude Code with the discord-sync channel and hooks.
  *
- *   bun src/ccd.ts [claude args…]      spawn claude (Windows, via bin/ccd.cmd)
- *   bun src/ccd.ts --write-config      write the config files and print their folder
- *                                      (bin/ccd uses this, then execs claude itself so
- *                                      Claude Code keeps the shell's PID, e.g. a tmux pane's)
+ *   ccd [claude args…]                 spawn claude with the config below
+ *   ccd --write-config                 write the config files and print their folder
+ *                                      (the source checkout's bin/ccd uses this, then execs
+ *                                      claude itself so Claude Code keeps the shell's PID)
  */
 import { mkdirSync, writeFileSync } from 'fs'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import { STATE_DIR } from './config'
 import { IS_WIN } from './platform'
+import { selfCommand } from './self'
 
-const ROOT = resolve(import.meta.dir, '..')
 // Forward slashes work in Windows APIs and in the shells hooks run under (sh / Git Bash / cmd).
 const slash = (p: string) => p.replace(/\\/g, '/')
-const BUN = slash(process.execPath)
 const q = (p: string) => `"${slash(p)}"`
+/** A hook command line that runs one of our subcommands. */
+const hook = (sub: string) => selfCommand(sub).map(q).join(' ')
 
 /** Questions and plans wait this long on Discord before falling back to the terminal. */
 const askTimeout = Number(process.env.DISCORD_SYNC_ASK_TIMEOUT) || 600
@@ -24,10 +25,8 @@ const askTimeout = Number(process.env.DISCORD_SYNC_ASK_TIMEOUT) || 600
 function writeConfig(): string {
   const dir = join(STATE_DIR, 'ccd')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(
-    join(dir, 'mcp.json'),
-    JSON.stringify({ mcpServers: { 'discord-sync': { command: BUN, args: [slash(join(ROOT, 'src', 'channel-server.ts'))] } } }, null, 2),
-  )
+  const [command, ...args] = selfCommand('channel').map(slash)
+  writeFileSync(join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { 'discord-sync': { command, args } } }, null, 2))
   writeFileSync(
     join(dir, 'settings.json'),
     JSON.stringify(
@@ -36,9 +35,9 @@ function writeConfig(): string {
           PreToolUse: [
             {
               matcher: 'AskUserQuestion|ExitPlanMode',
-              hooks: [{ type: 'command', command: `${q(BUN)} ${q(join(ROOT, 'src', 'ask-hook.ts'))}`, timeout: askTimeout + 30 }],
+              hooks: [{ type: 'command', command: hook('ask-hook'), timeout: askTimeout + 30 }],
             },
-            { matcher: '*', hooks: [{ type: 'command', command: `${q(BUN)} ${q(join(ROOT, 'src', 'stop-hook.ts'))}` }] },
+            { matcher: '*', hooks: [{ type: 'command', command: hook('stop-hook') }] },
           ],
         },
       },

@@ -44,7 +44,9 @@ import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } fr
 import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
-import { IS_WIN, IS_LINUX, hasTmux } from './platform'
+import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
+import { COMPILED, selfCommand } from './self'
+import { daemonRunning } from './autostart'
 import { keysToTmux, type Key } from './keys'
 
 const cfg = loadConfig()
@@ -937,7 +939,11 @@ const quoteLines = (s: string) => s.split('\n').map(l => '> ' + l).join('\n')
 // ---- !new: start a ccd session in tmux --------------------------------------
 
 const run = promisify(execFile)
-const CCD = resolve(import.meta.dir, '..', 'bin', 'ccd')
+/**
+ * How tmux starts ccd. From a source checkout, bin/ccd execs claude so the pane's
+ * process is Claude Code itself; the compiled binary has to spawn it as a child.
+ */
+const CCD_TMUX = COMPILED ? selfCommand('ccd') : [resolve(import.meta.dir, '..', 'bin', 'ccd')]
 const NEW_TIMEOUT_MS = 45_000
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
@@ -998,7 +1004,7 @@ type Launch = {
 /** Detached tmux session (Linux, macOS). `exec` makes the pane's process Claude Code itself, so pane_pid identifies it. */
 async function startInTmux(dir: string, args: string[]): Promise<Launch> {
   const name = `ccd-${Math.random().toString(36).slice(2, 6)}`
-  const cmd = ['exec', shq(CCD), ...args.map(shq)].join(' ')
+  const cmd = ['exec', ...CCD_TMUX.map(shq), ...args.map(shq)].join(' ')
   // remain-on-exit keeps the screen around if it dies during startup, so we can show why.
   const { stdout } = await run('tmux', [
     'new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', name, '-x', '200', '-y', '50', '-c', dir, cmd,
@@ -1020,7 +1026,7 @@ async function startInTmux(dir: string, args: string[]): Promise<Launch> {
       }
     },
     press: key => run('tmux', ['send-keys', '-t', name, key]),
-    owns: t => t.live?.pid === panePid,
+    owns: t => !!t.live && (t.live.pid === panePid || parentPid(t.live.pid) === panePid),
     registered: () => run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {}),
   }
 }
@@ -1037,11 +1043,8 @@ const samePath = (a: string, b: string) => (IS_WIN ? resolve(a).toLowerCase() ==
  */
 async function startInConsole(dir: string, args: string[], resumeId?: string): Promise<Launch> {
   const launchedAt = Date.now()
-  const ps = [
-    `$p = Start-Process -PassThru -FilePath ${psq(join(import.meta.dir, '..', 'bin', 'ccd.cmd'))} -WorkingDirectory ${psq(dir)}`,
-    args.length ? ` -ArgumentList ${psq(args.map(winArg).join(' '))}` : '',
-    '; $p.Id',
-  ].join('')
+  const [exe, ...ccdArgs] = selfCommand('ccd', ...args)
+  const ps = `$p = Start-Process -PassThru -FilePath ${psq(exe)} -WorkingDirectory ${psq(dir)} -ArgumentList ${psq(ccdArgs.map(winArg).join(' '))}; $p.Id`
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true })
   const pid = Number(stdout.trim())
   let last = ''
@@ -1158,13 +1161,12 @@ function typeViaPeer(peer: Socket, keys: Key[]): Promise<{ ok: boolean; error?: 
   })
 }
 
-const WIN_CONSOLE = join(import.meta.dir, 'win-console.ts')
 
 /** Windows: attach to the process's console in a helper process and type there / read the screen. */
 async function winConsole(cmd: 'type' | 'screen', pid: number, keys?: Key[]): Promise<{ ok: boolean; error?: string; text?: string }> {
   try {
-    const args = [WIN_CONSOLE, cmd, String(pid), ...(keys ? [JSON.stringify(keys)] : [])]
-    const { stdout } = await run(process.execPath, args, { windowsHide: true })
+    const [exe, ...args] = selfCommand('win-console', cmd, String(pid), ...(keys ? [JSON.stringify(keys)] : []))
+    const { stdout } = await run(exe, args, { windowsHide: true })
     return JSON.parse(stdout.trim().split('\n').pop() ?? '{}')
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) }
@@ -1688,6 +1690,13 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
+
+// Two daemons would steal each other's socket and both drive the bot. Exit 0 so
+// systemd / launchd don't keep restarting this one.
+if (await daemonRunning()) {
+  log(`another daemon is already running (${SOCKET_PATH}); exiting`)
+  process.exit(0)
+}
 
 client.login(cfg.token).catch(e => {
   log('login failed:', e.message)
