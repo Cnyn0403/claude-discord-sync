@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Launch Claude Code with the discord-sync channel loaded, so the session can
+# be driven from Discord. All arguments are passed through to `claude`.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+BUN="$(command -v bun)"
+MCP="{\"mcpServers\":{\"discord-sync\":{\"command\":\"$BUN\",\"args\":[\"$DIR/src/channel-server.ts\"]}}}"
+exec claude --mcp-config "$MCP" --dangerously-load-development-channels server:discord-sync "$@"
