@@ -1833,12 +1833,14 @@ async function endMeeting(t: Tracked, msg: Message, peer: Socket) {
     `Participants: ${people.map(u => `${u.username} (${roleTag(u.id, t.st)})`).join(', ')}`,
     `${new Date(meeting.startedAt).toISOString()} – ${msg.createdAt.toISOString()} (UTC)`,
     '',
-    ...msgs.map(x => {
+    ...msgs.flatMap(x => {
       const files = [...x.attachments.values()]
         .map(a => `\n  [attachment: ${a.name} ${saved.get(a.id) ? `saved at ${saved.get(a.id)}` : `(not downloaded: over 25 MB or failed) ${a.url}`}]`)
         .join('')
       // Drop the bot's tag before mentions are turned into @names.
       const text = cleanContent(x.content.replace(botMention, ''), ch)
+      // A bare bot tag leaves nothing to record.
+      if (!text.trim() && !files) return []
       return `**${x.author.username}** (${roleTag(x.author.id, t.st)}) ${time(x.createdAt)}: ${text.trim()}${files}`
     }),
   ].join('\n')
