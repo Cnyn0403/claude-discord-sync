@@ -48,11 +48,16 @@ mv -f "$dir/claude-discord-sync.new" "$dir/claude-discord-sync"
 ln -sf "$dir/claude-discord-sync" "$bin/claude-discord-sync"
 echo "Installed $bin/claude-discord-sync"
 
-# Piped into sh, our stdin is this script; give setup the terminal instead.
+# Piped into sh, our stdin is this script; give setup the terminal instead. Use the
+# terminal's real device (e.g. /dev/ttys001): on macOS, kqueue can't watch /dev/tty
+# itself, so a program reading it never sees any input.
 if [ -n "${CDS_NO_SETUP:-}" ]; then
   echo "Now run: claude-discord-sync setup"
 elif [ -r /dev/tty ]; then
-  "$dir/claude-discord-sync" setup </dev/tty
+  # ps names our controlling terminal (ttys001 on macOS, pts/0 on Linux).
+  term="/dev/$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')"
+  [ -r "$term" ] && [ "$term" != /dev/ ] || term=/dev/tty
+  "$dir/claude-discord-sync" setup <"$term"
 else
   echo "Now run: claude-discord-sync setup"
 fi
