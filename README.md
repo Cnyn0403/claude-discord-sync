@@ -171,6 +171,7 @@ By default, use one bot per computer. To share one bot and server between comput
 Set it on **every** computer that shares the bot, with a different name on each, then restart their daemons. Each computer then:
 
 - gets its own category (`Claude Sessions · home-server`) and console (`claude-console-home-server`); its existing channels move there;
+- tags its posts in the shared archive forum with its name (filter the forum by tag to see one computer's sessions);
 - keeps an entry in a shared `#claude-devices` channel, updated every minute, so the computers know who is online;
 - handles only what happens in its own channels. `/new` takes a computer first (autocomplete lists them) and runs only there.
 

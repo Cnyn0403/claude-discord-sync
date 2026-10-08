@@ -396,6 +396,7 @@ async function archiveToForum(t: Tracked) {
   const forum = await archiveForum()
   const md = conversationMarkdown(st)
   const content = [
+    MACHINE ? `💻 **${MACHINE}**` : '',
     `📂 \`${st.cwd}\``,
     `🆔 \`${t.sessionId}\``,
     m.endedAt(`<t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`),
@@ -421,12 +422,45 @@ async function archiveToForum(t: Tracked) {
   }
   if (!thread) {
     const name = clip(st.title || st.lastPrompt || basename(st.cwd) || t.sessionId, 100)
-    thread = await forum.threads.create({ name, message })
+    const tag = MACHINE ? await machineTag(forum) : undefined
+    thread = await forum.threads.create({ name, message, appliedTags: tag ? [tag] : [] })
   }
   // Point the session at the post before deleting the channel, so channelDelete doesn't forget it.
   st.archiveThreadId = st.channelId = thread.id
   stateDirty = true
   await ch?.delete('discord-sync: archived to forum').catch(e => log('delete after archive failed:', e?.message))
+}
+
+/**
+ * Multi-machine mode: the forum tag named after this computer, created if
+ * missing, so the forum can be filtered by computer. Undefined if the forum is
+ * out of tags (Discord allows 20) or can't be edited.
+ */
+async function machineTag(forum: ForumChannel): Promise<string | undefined> {
+  const name = MACHINE!.slice(0, 20)
+  const find = () => forum.availableTags.find(t => t.name === name)?.id
+  if (find()) return find()
+  if (forum.availableTags.length >= 20) return undefined
+  await forum.setAvailableTags([...forum.availableTags, { name, emoji: { id: null, name: '💻' } }]).catch(e => log('adding forum tag failed:', e?.message ?? e))
+  return find()
+}
+
+/** Tag this computer's forum posts from before multi-machine mode (or before the tag existed). */
+async function tagOwnPosts() {
+  const forum = state.archiveForumId ? guild.channels.cache.get(state.archiveForumId) : undefined
+  if (forum?.type !== ChannelType.GuildForum) return
+  const tag = await machineTag(forum)
+  if (!tag) return
+  for (const st of Object.values(state.sessions)) {
+    if (!st.ended || !st.archiveThreadId) continue
+    const post = await guild.channels.fetch(st.archiveThreadId).catch(() => null)
+    if (!post?.isThread() || post.appliedTags.includes(tag) || post.appliedTags.length >= 5) continue
+    // Editing an archived post would reopen it; keep it closed afterwards.
+    const wasArchived = post.archived
+    if (wasArchived) await post.setArchived(false).catch(() => {})
+    await post.setAppliedTags([...post.appliedTags, tag]).catch(() => {})
+    if (wasArchived) await post.setArchived(true).catch(() => {})
+  }
 }
 
 /** Ended sessions still archived the old way, as a text channel. */
@@ -2523,6 +2557,7 @@ client.once('clientReady', async c => {
   if (MACHINE) {
     await machineTick().catch(e => log('devices update failed:', e?.message ?? e))
     setInterval(() => void machineTick().catch(e => log('devices update failed:', e?.message ?? e)), DEVICES_REFRESH_MS)
+    void tagOwnPosts().catch(e => log('tagging forum posts failed:', e?.message ?? e))
     log(`multi-machine mode: this is "${MACHINE}"`)
   }
   log(`syncing into ${guild.name} (${guild.id})`)
