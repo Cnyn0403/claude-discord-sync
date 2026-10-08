@@ -140,6 +140,15 @@ Collaborators' messages reach Claude marked with their role. Anyone who can talk
 
 This needs the bot's **Manage Roles** permission. Without it the daemon logs a warning, channels stay visible to the whole server and `/share` is disabled.
 
+## Meetings
+
+To talk things over with the people you shared a session with, without every message going to Claude:
+
+1. **Start:** @-mention someone (not the bot) in the session channel. The bot announces meeting mode, and from then on messages stay among you.
+2. **Finish:** @-mention the bot. Whatever else that message says is the conclusion ("@bot let's go with option A, and record it in docs/decisions.md"). With nothing else, Claude reads the discussion, summarizes it and proposes next steps.
+
+Claude receives the whole discussion as a Markdown file (who said what, with their role) plus the conclusion. A message mentioning both a person and the bot is a normal message to Claude, not a meeting. Permission replies (`yes abcde`) still work during a meeting, and the bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own.
+
 ## Pausing
 
 Pause mirroring when you're about to work on something that shouldn't reach Discord:

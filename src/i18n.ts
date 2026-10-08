@@ -164,6 +164,13 @@ const en = {
   pauseMenu: '⏯️ Pause / resume one session…',
   pauseAll: 'Pause all',
   resumeAll: 'Resume all',
+
+  // meetings
+  meetingStarted: '🗣️ **Meeting mode.** Messages here are not sent to Claude for now. When you\'re done, @-mention me with the conclusion (or just @-mention me and Claude reads the discussion).',
+  meetingNoAccess: (names: string) => `⚠️ ${names} can't see this channel; use \`/share\` to let them in.`,
+  meetingEnded: (n: number) => `📨 Meeting over: sent the discussion (${n} messages) to Claude.`,
+  meetingIdle: '🗣️ The meeting has been quiet for 30 minutes. @-mention me with the conclusion to hand it to Claude.',
+  meetingLastPrompt: '(meeting notes)',
 } as const
 
 type Widen<T> = { [K in keyof T]: T[K] extends string ? string : T[K] }
@@ -315,6 +322,12 @@ const zhTW: Messages = {
   pauseMenu: '⏯️ 暫停／恢復某個 session 的同步…',
   pauseAll: '全部暫停',
   resumeAll: '全部恢復',
+
+  meetingStarted: '🗣️ **會議模式**：接下來的訊息不會傳給 Claude。討論完後 tag 我並寫上結論（或只 tag 我，讓 Claude 自己看討論內容）。',
+  meetingNoAccess: names => `⚠️ ${names} 看不到這個頻道，可以用 \`/share\` 分享給他。`,
+  meetingEnded: n => `📨 會議結束：已把討論內容（${n} 則訊息）交給 Claude。`,
+  meetingIdle: '🗣️ 會議已經 30 分鐘沒有人說話了。討論完後 tag 我並寫上結論，就會交給 Claude。',
+  meetingLastPrompt: '（會議記錄）',
 }
 
 export const LANGUAGES = { en, 'zh-TW': zhTW } as const satisfies Record<string, Messages>

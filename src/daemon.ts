@@ -72,7 +72,11 @@ type SessionState = {
   /** Mirroring paused for this session; pausedSkipped counts what wasn't posted. */
   paused?: boolean
   pausedSkipped?: number
+  /** A discussion among people in the channel, not sent to Claude until someone @-mentions the bot. */
+  meeting?: Meeting
 }
+
+type Meeting = { startMessageId: string; startedAt: number; lastAt: number; reminded?: boolean }
 
 /**
  * Access to a session. Owners (allowFrom) can do everything; the rest is per session:
@@ -596,6 +600,7 @@ async function tick() {
       }
       pump(t)
       notifyWhenDone(t)
+      remindIdleMeeting(t)
       // Typing indicator while Claude is working (lasts ~10s per call).
       if (t.live?.status === 'busy' && !isPaused(t.st) && Date.now() - t.lastTyping > 8000) {
         t.lastTyping = Date.now()
@@ -670,10 +675,6 @@ client.on('messageCreate', async (msg: Message) => {
     void msg.react('🚫').catch(() => {})
     return
   }
-  if (isPaused(t.st)) {
-    void msg.reply(m.pausedReply).catch(() => {})
-    return
-  }
   const peer = t.live ? peers.get(t.live.pid) : undefined
   if (!peer) {
     void msg
@@ -681,6 +682,7 @@ client.on('messageCreate', async (msg: Message) => {
       .catch(() => {})
     return
   }
+  // Permission answers work in any mode, meetings included.
   const perm = PERMISSION_REPLY_RE.exec(msg.content)
   if (perm) {
     if (!can(msg.author.id, t.st, 'approve')) {
@@ -690,6 +692,27 @@ client.on('messageCreate', async (msg: Message) => {
     const behavior = perm[1].toLowerCase().startsWith('y') ? 'allow' : 'deny'
     ipcSend(peer, { t: 'permission', request_id: perm[2].toLowerCase(), behavior })
     void msg.react(behavior === 'allow' ? '✅' : '❌').catch(() => {})
+    return
+  }
+  // Meetings: @-mentioning people (but not the bot) starts one; messages stay among the
+  // people until someone @-mentions the bot, which hands the whole discussion to Claude.
+  // Only an explicit @: replying to one of the bot's messages pings it too, but shouldn't end a meeting.
+  const mentionsBot = msg.mentions.has(client.user!, { ignoreRepliedUser: true, ignoreEveryone: true, ignoreRoles: true })
+  if (t.st.meeting) {
+    if (mentionsBot) await endMeeting(t, msg, peer)
+    else {
+      t.st.meeting.lastAt = Date.now()
+      stateDirty = true
+    }
+    return
+  }
+  const people = msg.mentions.users.filter(u => !u.bot && u.id !== msg.author.id)
+  if (people.size && !mentionsBot) {
+    await startMeeting(t, msg, [...people.values()])
+    return
+  }
+  if (isPaused(t.st)) {
+    void msg.reply(m.pausedReply).catch(() => {})
     return
   }
   const files = await downloadAttachments(msg).catch(() => [] as string[])
@@ -704,7 +727,7 @@ client.on('messageCreate', async (msg: Message) => {
       message_id: msg.id,
       user: msg.author.username,
       // Lets Claude tell the owner from someone they shared the session with.
-      ...(isOwner(msg.author.id) ? {} : { role: t.st.members?.[msg.author.id] === 'full' ? 'collaborator (full)' : 'collaborator' }),
+      ...(isOwner(msg.author.id) ? {} : { role: roleTag(msg.author.id, t.st) }),
       ts: msg.createdAt.toISOString(),
       ...(files.length ? { attachments: files.join('; ') } : {}),
     },
@@ -1751,6 +1774,91 @@ function memberList(st: SessionState): string {
   const lines = cfg.allowFrom.map(id => `👑 <@${id}> · ${m.roleOwner}`)
   for (const [id, role] of Object.entries(st.members ?? {})) lines.push(`${role === 'viewer' ? '👀' : role === 'collab' ? '💬' : '🔑'} <@${id}> · ${roleName(role)}`)
   return `${m.membersTitle}\n${lines.join('\n')}`
+}
+
+/** How a person is described to Claude. */
+function roleTag(userId: string, st: SessionState): string {
+  const a = accessOf(userId, st)
+  return a === 'owner' ? 'owner' : a === 'full' ? 'collaborator (full)' : a === 'collab' ? 'collaborator' : a === 'viewer' ? 'viewer' : 'no access'
+}
+
+// ---- meetings ---------------------------------------------------------------------
+
+const MEETING_IDLE_MS = 30 * 60_000
+const MEETING_MAX_MESSAGES = 1000
+
+async function startMeeting(t: Tracked, msg: Message, people: import('discord.js').User[]) {
+  t.st.meeting = { startMessageId: msg.id, startedAt: Date.now(), lastAt: Date.now() }
+  stateDirty = true
+  // The channel is private: point out anyone who can't see it.
+  const locked = people.filter(u => !can(u.id, t.st, 'view')).map(u => u.username)
+  await msg.reply({ content: [m.meetingStarted, locked.length ? m.meetingNoAccess(locked.join(', ')) : ''].filter(Boolean).join('\n'), allowedMentions: { parse: [] } }).catch(() => {})
+}
+
+/** Every human message from the meeting's first message up to and including `last`, oldest first. */
+async function meetingMessages(ch: TextChannel, startId: string, last: Message): Promise<Message[]> {
+  const out: Message[] = []
+  let after = (BigInt(startId) - 1n).toString()
+  while (out.length < MEETING_MAX_MESSAGES) {
+    const batch = [...(await ch.messages.fetch({ after, limit: 100 })).values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
+    if (!batch.length) break
+    for (const msg of batch) if (BigInt(msg.id) <= BigInt(last.id) && !msg.author.bot) out.push(msg)
+    after = batch[batch.length - 1].id
+    if (batch.length < 100 || BigInt(after) >= BigInt(last.id)) break
+  }
+  return out
+}
+
+/** Write the discussion to a Markdown file and send it to Claude with the closing message as the conclusion. */
+async function endMeeting(t: Tracked, msg: Message, peer: Socket) {
+  const meeting = t.st.meeting!
+  if (isPaused(t.st)) return void msg.reply(m.pausedReply).catch(() => {})
+  const ch = await channelOf(t)
+  if (!ch) return
+  const msgs = await meetingMessages(ch, meeting.startMessageId, msg)
+  const botMention = new RegExp(`<@!?${client.user!.id}>`, 'g')
+  const people = [...new Map(msgs.map(x => [x.author.id, x.author])).values()]
+  const time = (d: Date) => d.toISOString().slice(11, 16)
+  const notes = [
+    `# Discussion in #${ch.name}`,
+    `Participants: ${people.map(u => `${u.username} (${roleTag(u.id, t.st)})`).join(', ')}`,
+    `${new Date(meeting.startedAt).toISOString()} – ${msg.createdAt.toISOString()} (UTC)`,
+    '',
+    ...msgs.map(x => {
+      const files = [...x.attachments.values()].map(a => `\n  [attachment: ${a.name} ${a.url}]`).join('')
+      return `**${x.author.username}** (${roleTag(x.author.id, t.st)}) ${time(x.createdAt)}: ${x.cleanContent.replace(botMention, '').trim()}${files}`
+    }),
+  ].join('\n')
+  mkdirSync(INBOX_DIR, { recursive: true })
+  const file = join(INBOX_DIR, `meeting-${Date.now()}.md`)
+  writeFileSync(file, notes)
+  const conclusion = msg.content.replace(botMention, '').trim()
+  ipcSend(peer, {
+    t: 'message',
+    content: conclusion || '(no conclusion given)',
+    meta: {
+      message_id: msg.id,
+      user: msg.author.username,
+      ...(isOwner(msg.author.id) ? {} : { role: roleTag(msg.author.id, t.st) }),
+      ts: msg.createdAt.toISOString(),
+      meeting: `${msgs.length} messages from ${people.map(u => u.username).join(', ')}`,
+      attachments: file,
+    },
+  })
+  t.st.meeting = undefined
+  t.st.lastPrompt = (conclusion || m.meetingLastPrompt).replace(/\s+/g, ' ').slice(0, 200)
+  stateDirty = true
+  void msg.react('📨').catch(() => {})
+  await msg.reply({ content: m.meetingEnded(msgs.length), allowedMentions: { parse: [] } }).catch(() => {})
+}
+
+/** Nudge once when a meeting has gone quiet; nothing is sent to Claude on its own. */
+function remindIdleMeeting(t: Tracked) {
+  const mt = t.st.meeting
+  if (!mt || mt.reminded || Date.now() - mt.lastAt < MEETING_IDLE_MS) return
+  mt.reminded = true
+  stateDirty = true
+  void post(t, [m.meetingIdle])
 }
 
 // ---- pausing --------------------------------------------------------------------

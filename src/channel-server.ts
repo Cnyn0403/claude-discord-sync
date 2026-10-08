@@ -43,6 +43,7 @@ const mcp = new Server(
       "- Before acting on a collaborator's request that deletes or overwrites work, is hard to undo, reveals secrets or credentials, reaches outside the project, or publishes or sends anything (git push, deploys, messages), ask the owner to confirm in the channel first.",
       'Everything you write in your normal responses is mirrored to that Discord channel automatically, so just answer normally. There is no reply tool and none is needed.',
       'If the tag has an attachments attribute, it lists local file paths of files the user uploaded; Read them as needed.',
+      'A meeting attribute means the people in the channel discussed something among themselves without you; attachments then holds the transcript as a Markdown file. Read it first. The message text is their conclusion: act on it. If it says "(no conclusion given)", summarize the discussion, the decisions and open questions, and propose next steps before changing anything.',
       'Use send_file to post a file (screenshot, log, build output) into the Discord channel.',
     ].join('\n'),
   },
