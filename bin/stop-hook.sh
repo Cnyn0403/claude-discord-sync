@@ -7,4 +7,4 @@ dir="${DISCORD_SYNC_STATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/channels/disc
 sid=$(printf '%s' "$input" | sed -n 's/.*"session_id" *: *"\([0-9a-zA-Z-]*\)".*/\1/p' | head -n 1)
 [ -n "$sid" ] && [ -e "$dir/$sid" ] || exit 0
 rm -f "$dir/$sid"
-printf '{"continue":false,"stopReason":"已從 Discord 停止"}'
+printf '{"continue":false,"stopReason":"Stopped from Discord"}'

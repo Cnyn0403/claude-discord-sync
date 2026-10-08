@@ -57,7 +57,7 @@ try {
           ? { permissionDecision: 'allow' }
           : {
               permissionDecision: 'deny',
-              permissionDecisionReason: `使用者在 Discord 上要求修改計畫，請依照以下意見修改後再提出：\n${r.feedback ?? ''}`,
+              permissionDecisionReason: `The user asked on Discord to revise the plan. Revise it accordingly and present it again:\n${r.feedback ?? ''}`,
             },
       )
     }

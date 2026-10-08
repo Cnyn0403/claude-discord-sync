@@ -5,8 +5,8 @@
 Mirror every Claude Code session on your machine into its own Discord channel, and drive sessions from Discord: chat with Claude, answer its questions with select menus, approve plans and permissions with buttons, interrupt it, and start, end or resume sessions from your phone.
 
 > Unofficial community project, not affiliated with Anthropic. It relies on Claude Code's *channels* feature (research preview) and on Claude Code's internal session files, so a Claude Code update can break it.
->
-> The Discord-facing text (buttons, status messages, channel names) is currently in Traditional Chinese.
+
+The Discord-facing text is available in English and Traditional Chinese (`"language"` in the config).
 
 ```
  Discord guild                        this machine
@@ -121,11 +121,12 @@ Each command also works as `!new`, `!stop`, and so on.
 
 ```json
 {
+  "language": "en",
   "guildId": "123456789012345678",
   "allowFrom": ["your Discord user ID"],
   "categoryName": "Claude Sessions",
-  "consoleChannelName": "claude-控制台",
-  "archiveForumName": "claude-已結束",
+  "consoleChannelName": "claude-console",
+  "archiveForumName": "claude-archive",
   "archiveCategoryName": "Claude Sessions (ended)",
   "deleteEndedAfterDays": 7,
   "kinds": ["interactive"],
@@ -138,11 +139,12 @@ Each command also works as `!new`, `!stop`, and so on.
 
 | Key | Meaning |
 |---|---|
+| `language` | `"en"` (default) or `"zh-TW"`. Slash command descriptions follow each user's Discord language regardless |
 | `guildId` | Server to use. Auto-detected when the bot is in exactly one |
 | `allowFrom` | Discord user IDs allowed to talk to sessions, press buttons and run commands. Everyone else gets 🚫 |
 | `categoryName` | Category for session channels |
-| `consoleChannelName` | Console channel name; `""` disables it |
-| `archiveForumName` | Forum for ended sessions; `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
+| `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
+| `archiveForumName` | Forum for ended sessions, default `claude-archive` (`claude-已結束` in zh-TW); `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
 | `archiveCategoryName` | Archive category when no forum is used; `""` leaves channels in place |
 | `deleteEndedAfterDays` | Delete archived sessions after this many days; `0` keeps them |
 | `kinds` | Session kinds to mirror, from `~/.claude/sessions/<pid>.json` |

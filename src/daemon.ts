@@ -43,6 +43,7 @@ import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
+import { m, SLASH_DESCRIPTIONS } from './i18n'
 
 const cfg = loadConfig()
 const STATE_FILE = join(STATE_DIR, 'state.json')
@@ -176,10 +177,10 @@ function headerFor(t: Tracked): string {
   const s = t.live!
   const interactive = peers.has(s.pid)
   return [
-    `🟢 **Session 開始同步**`,
+    m.syncStarted,
     `📂 \`${s.cwd}\``,
     `🆔 \`${s.sessionId}\` · PID ${s.pid}`,
-    interactive ? '💬 雙向模式：可以直接在這裡對 Claude 說話' : '👀 唯讀模式（這個 session 沒有載入 discord-sync channel）',
+    interactive ? m.twoWay : m.readOnly,
   ].join('\n')
 }
 
@@ -204,7 +205,7 @@ async function startTracking(s: LiveSession) {
       if (ch.parentId !== state.categoryId) await ch.setParent(state.categoryId!, { lockPermissions: false }).catch(() => {})
       prev!.ended = false
       prev!.endedAt = undefined
-      await post(t, [`🟢 **Session 恢復** · PID ${s.pid}`])
+      await post(t, [m.resumed(s.pid)])
     }
   } else {
     ch = await guild.channels.create({
@@ -229,7 +230,7 @@ async function startTracking(s: LiveSession) {
       }
       noteLastPrompt(t, blocks)
       const shown = blocks.slice(-cfg.backlog)
-      if (blocks.length > shown.length) await post(t, [`-# …（略過較早的 ${blocks.length - shown.length} 則）`])
+      if (blocks.length > shown.length) await post(t, [m.skippedOlder(blocks.length - shown.length)])
       await post(t, pack(shown, cfg.attachOver))
       t.st.offset = tail.offset
       if (t.st.title) await ch.setTopic(topicFor(s.sessionId, t.st)).catch(() => {})
@@ -247,7 +248,7 @@ async function startTracking(s: LiveSession) {
 
 async function endTracking(t: Tracked) {
   pump(t)
-  await post(t, ['🔴 **Session 已結束**'])
+  await post(t, [m.sessionEnded])
   t.st.ended = true
   t.st.endedAt = Date.now()
   stateDirty = true
@@ -289,7 +290,7 @@ async function archiveForum(): Promise<ForumChannel> {
         name: cfg.archiveForumName,
         type: ChannelType.GuildForum,
         parent: state.categoryId,
-        topic: '已結束的 Claude Code session。按貼文裡的「▶️ 恢復」或輸入 /resume 可以接著做；刪掉貼文就會從清單移除。',
+        topic: m.forumTopic,
       })
       .catch(e => {
         forumFailedAt = Date.now()
@@ -307,12 +308,12 @@ function conversationMarkdown(st: SessionState): string | undefined {
   const blocks = new JsonlTail(st.transcript).read().flatMap(o => renderRecord(o, ctx))
   const md = blocks.map(b => b.text).join('\n\n')
   // Discord's default upload limit is 10 MB; keep the most recent part.
-  return md.length > 9_000_000 ? '…（較早的內容已省略）\n\n' + md.slice(-9_000_000) : md
+  return md.length > 9_000_000 ? m.olderOmitted + '\n\n' + md.slice(-9_000_000) : md
 }
 
 const resumeRow = (sessionId: string) =>
   new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`resume:${sessionId}`).setLabel('恢復').setEmoji('▶️').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`resume:${sessionId}`).setLabel(m.resume).setEmoji('▶️').setStyle(ButtonStyle.Success),
   )
 
 /**
@@ -328,9 +329,9 @@ async function archiveToForum(t: Tracked) {
   const content = [
     `📂 \`${st.cwd}\``,
     `🆔 \`${t.sessionId}\``,
-    `🔴 結束於 <t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`,
-    st.lastPrompt ? `💬 最後說的話：${clip(st.lastPrompt, 300)}` : '',
-    '-# 按「恢復」或在這裡輸入 `/resume` 可以接著做',
+    m.endedAt(`<t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`),
+    st.lastPrompt ? m.lastPrompt(clip(st.lastPrompt, 300)) : '',
+    m.resumeHint,
   ]
     .filter(Boolean)
     .join('\n')
@@ -374,19 +375,19 @@ let migrating = false
  * removed once it's empty.
  */
 async function migrateToForum(r: Replier) {
-  if (!cfg.archiveForumName) return void (await r.reply('沒有設定論壇（`archiveForumName` 是空的）。'))
-  if (migrating) return void (await r.reply('已經在搬了。'))
+  if (!cfg.archiveForumName) return void (await r.reply(m.noForum))
+  if (migrating) return void (await r.reply(m.alreadyMigrating))
   const items = legacyArchived()
-  if (!items.length) return void (await r.reply('沒有需要搬的頻道。'))
+  if (!items.length) return void (await r.reply(m.nothingToMigrate))
   migrating = true
   try {
     forumFailedAt = 0 // an explicit request: try again even if it failed recently
     try {
       await archiveForum()
     } catch (e: any) {
-      return void (await r.reply(`⚠️ 還是沒辦法建立論壇：${e?.message ?? e}`))
+      return void (await r.reply(m.forumStillUnavailable(String(e?.message ?? e))))
     }
-    const status = await r.reply(`🗂️ 搬移中… 0/${items.length}`)
+    const status = await r.reply(m.migrating(0, items.length))
     let moved = 0
     let dropped = 0
     const failed: string[] = []
@@ -405,7 +406,7 @@ async function migrateToForum(r: Replier) {
       } catch (e: any) {
         failed.push(`#${ch?.name ?? sid}：${e?.message ?? e}`)
       }
-      await status.edit(`🗂️ 搬移中… ${moved + dropped + failed.length}/${items.length}`).catch(() => {})
+      await status.edit(m.migrating(moved + dropped + failed.length, items.length)).catch(() => {})
     }
     await Bun.sleep(1500) // let the channelDelete events update the category's children
     const cat = state.archiveCategoryId ? guild.channels.cache.get(state.archiveCategoryId) : undefined
@@ -414,8 +415,8 @@ async function migrateToForum(r: Replier) {
       state.archiveCategoryId = undefined
       stateDirty = true
     }
-    const lines = [`✅ 搬好了：${moved} 個搬到論壇，${dropped} 個沒有對話的直接刪除。`]
-    if (failed.length) lines.push(`⚠️ ${failed.length} 個失敗：`, ...failed.slice(0, 10).map(f => `- ${clip(f, 150)}`))
+    const lines = [m.migrated(moved, dropped)]
+    if (failed.length) lines.push(m.migrateFailed(failed.length), ...failed.slice(0, 10).map(f => `- ${clip(f, 150)}`))
     await status.edit(clip(lines.join('\n'), 2000))
   } finally {
     migrating = false
@@ -489,7 +490,7 @@ function noteLastPrompt(t: Tracked, blocks: Block[]) {
 
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
-  return s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`
+  return m.duration(Math.floor(s / 60), s % 60)
 }
 
 /** @-mention the user when Claude finishes a turn, so they know to come back. */
@@ -511,7 +512,7 @@ function notifyWhenDone(t: Tracked) {
   void channelOf(t).then(ch => {
     if (!ch) return
     void enqueue(ch.id, () =>
-      ch.send({ content: `${mentions} ✅ Claude 完成了（${formatDuration(elapsed)}）`, allowedMentions: { users: cfg.allowFrom } }),
+      ch.send({ content: `${mentions} ${m.done(formatDuration(elapsed))}`, allowedMentions: { users: cfg.allowFrom } }),
     )
   })
 }
@@ -614,7 +615,7 @@ client.on('messageCreate', async (msg: Message) => {
   const peer = t.live ? peers.get(t.live.pid) : undefined
   if (!peer) {
     void msg
-      .reply('⚠️ 這個 session 是唯讀的（沒有載入 discord-sync channel）。要從 Discord 對話，請用 `ccd` 啟動 Claude Code。')
+      .reply(m.readOnlyReply)
       .catch(() => {})
     return
   }
@@ -650,7 +651,7 @@ client.on('interactionCreate', async (i: Interaction) => {
   }
   if (i.isChatInputCommand() && (COMMANDS as readonly string[]).includes(i.commandName)) {
     if (!cfg.allowFrom.includes(i.user.id)) {
-      await i.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+      await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
       return
     }
     await i.deferReply()
@@ -660,16 +661,16 @@ client.on('interactionCreate', async (i: Interaction) => {
   }
   if (i.isButton() && i.customId.startsWith('resume:')) {
     if (!cfg.allowFrom.includes(i.user.id)) {
-      await i.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+      await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
       return
     }
     const sid = i.customId.slice('resume:'.length)
     const st = state.sessions[sid]
     await i.deferReply()
     const r = interactionReplier(i)
-    if (!st) await r.reply('找不到這個 session。')
-    else if (!st.ended) await r.reply(`這個 session 還在執行中：<#${st.channelId}>`)
-    else await resumeSession(r, sid, st).catch(e => void r.reply(`⚠️ 失敗：${e?.message ?? e}`))
+    if (!st) await r.reply(m.sessionNotFound)
+    else if (!st.ended) await r.reply(m.stillRunningAt(st.channelId))
+    else await resumeSession(r, sid, st).catch(e => void r.reply(m.failed(String(e?.message ?? e))))
     return
   }
   if ((i.isButton() || i.isStringSelectMenu() || i.isModalSubmit()) && i.customId.startsWith('console:')) {
@@ -685,20 +686,20 @@ client.on('interactionCreate', async (i: Interaction) => {
     return
   }
   if (!i.isButton()) return
-  const m = /^perm:(allow|deny):(\d+):([a-km-z]{5})$/.exec(i.customId)
-  if (!m) return
+  const match = /^perm:(allow|deny):(\d+):([a-km-z]{5})$/.exec(i.customId)
+  if (!match) return
   if (!cfg.allowFrom.includes(i.user.id)) {
-    await i.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+    await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
     return
   }
-  const [, behavior, pid, request_id] = m
+  const [, behavior, pid, request_id] = match
   const peer = peers.get(Number(pid))
   if (!peer) {
-    await i.reply({ content: '這個 session 已經斷線。', ephemeral: true }).catch(() => {})
+    await i.reply({ content: m.sessionDisconnected, ephemeral: true }).catch(() => {})
     return
   }
   ipcSend(peer, { t: 'permission', request_id, behavior: behavior as 'allow' | 'deny' })
-  const label = behavior === 'allow' ? '✅ 已允許' : '❌ 已拒絕'
+  const label = behavior === 'allow' ? m.allowed : m.denied
   await i.update({ content: `${i.message.content}\n\n**${label}**（${i.user.username}）`, components: [] }).catch(() => {})
 })
 
@@ -723,7 +724,7 @@ function askContent(a: PendingAsk, footer?: string): string {
   const parts = a.questions.map((q, i) => {
     const opts = q.options.map((o, j) => `  **${j + 1}.** ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n')
     const ans = a.answers[i]
-    return `**❓ ${n > 1 ? `(${i + 1}) ` : ''}${q.question}**${q.multiSelect ? '（可複選）' : ''}\n${opts}${ans !== undefined ? `\n↳ ✅ **${ans}**` : ''}`
+    return `**❓ ${n > 1 ? `(${i + 1}) ` : ''}${q.question}**${q.multiSelect ? m.multiSelect : ''}\n${opts}${ans !== undefined ? `\n↳ ✅ **${ans}**` : ''}`
   })
   return clip([...parts, footer].filter(Boolean).join('\n\n'), 2000)
 }
@@ -735,7 +736,7 @@ function askComponents(key: string, a: PendingAsk) {
       value: String(j),
       ...(o.description ? { description: clip(o.description, 100) } : {}),
     }))
-    options.push({ label: '其他（自己輸入）…', value: OTHER, description: '用文字回答' })
+    options.push({ label: m.other, value: OTHER, description: m.otherDescription })
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`ask:${key}:${i}`)
       .setPlaceholder(clip(`${a.questions.length > 1 ? `(${i + 1}) ` : ''}${q.header ? `[${q.header}] ` : ''}${q.question}`, 150))
@@ -746,7 +747,7 @@ function askComponents(key: string, a: PendingAsk) {
   })
   rows.push(
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`askterm:${key}`).setLabel('改在終端機回答').setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`askterm:${key}`).setLabel(m.answerInTerminal).setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
     ),
   )
   return rows.slice(0, 5)
@@ -768,7 +769,7 @@ async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[
     if (asks.get(key) !== a) return
     asks.delete(key)
     if (a.messageId)
-      void ch.messages.edit(a.messageId, { content: askContent(a, '-# ⏱️ 已逾時，改在終端機回答'), components: [] }).catch(() => {})
+      void ch.messages.edit(a.messageId, { content: askContent(a, m.timedOut), components: [] }).catch(() => {})
   })
   const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
   const sent = await enqueue(ch.id, () =>
@@ -782,16 +783,16 @@ async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[
 }
 
 async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
-  const m = /^ask(term|other)?:(\w+)(?::(\d+))?$/.exec(i.customId)
-  if (!m) return
+  const match = /^ask(term|other)?:(\w+)(?::(\d+))?$/.exec(i.customId)
+  if (!match) return
   if (!cfg.allowFrom.includes(i.user.id)) {
-    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
-  const [, kind, key, qs] = m
+  const [, kind, key, qs] = match
   const a = asks.get(key)
   if (!a) {
-    await i.reply({ content: '這個問題已經結束了。', ephemeral: true })
+    await i.reply({ content: m.questionClosed, ephemeral: true })
     return
   }
   const update = (opts: { content: string; components: any[] }) =>
@@ -803,7 +804,7 @@ async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInter
   }
 
   if (kind === 'term') {
-    await settle(undefined, `-# ⌨️ 改在終端機回答（${i.user.username}）`)
+    await settle(undefined, m.answeringInTerminal(i.user.username))
     return
   }
   const qi = Number(qs)
@@ -816,14 +817,14 @@ async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInter
       a.picked.set(qi, labels)
       const input = new TextInputBuilder()
         .setCustomId('text')
-        .setLabel(clip(q.header || '你的回答', 45))
+        .setLabel(clip(q.header || m.yourAnswer, 45))
         .setPlaceholder(clip(q.question, 100))
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true)
       await i.showModal(
         new ModalBuilder()
           .setCustomId(`askother:${key}:${qi}`)
-          .setTitle('其他')
+          .setTitle(m.otherTitle)
           .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input)),
       )
       return
@@ -838,7 +839,7 @@ async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInter
   a.answers[qi] = answer
   if (a.answers.every(x => x !== undefined)) {
     const answers = Object.fromEntries(a.questions.map((q, j) => [q.question, a.answers[j]!]))
-    await settle(answers, `-# ✅ 已由 ${i.user.username} 回答`)
+    await settle(answers, m.answeredBy(i.user.username))
   } else {
     await update({ content: askContent(a), components: askComponents(key, a) })
   }
@@ -858,20 +859,20 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
   }
   const key = Math.random().toString(36).slice(2, 10)
   const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
-  const full = `📋 **計畫待確認**\n${plan}`
+  const full = `${m.planPending}\n${plan}`
   // Long plans: preview in the message, full text attached.
   const long = full.length > 1800
-  const p: PendingPlan = { sock, channelId: ch.id, content: long ? chunk(full, 1700)[0] + '\n-# 📎 完整計畫見附檔' : full }
+  const p: PendingPlan = { sock, channelId: ch.id, content: long ? chunk(full, 1700)[0] + '\n' + m.planAttached : full }
   plans.set(key, p)
   sock.on('close', () => {
     if (plans.get(key) !== p) return
     plans.delete(key)
-    if (p.messageId) void ch.messages.edit(p.messageId, { content: `${p.content}\n\n-# ⏱️ 已逾時，改在終端機回答`, components: [] }).catch(() => {})
+    if (p.messageId) void ch.messages.edit(p.messageId, { content: `${p.content}\n\n${m.timedOut}`, components: [] }).catch(() => {})
   })
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`plan:approve:${key}`).setLabel('核准').setEmoji('✅').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`plan:revise:${key}`).setLabel('繼續修改').setEmoji('✏️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`plan:term:${key}`).setLabel('改在終端機回答').setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`plan:approve:${key}`).setLabel(m.approve).setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`plan:revise:${key}`).setLabel(m.revise).setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`plan:term:${key}`).setLabel(m.answerInTerminal).setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
   )
   const sent = await enqueue(ch.id, () =>
     ch.send({
@@ -885,28 +886,28 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
 }
 
 async function handlePlanInteraction(i: ButtonInteraction | ModalSubmitInteraction) {
-  const m = /^plan(?::(approve|revise|term)|fb):(\w+)$/.exec(i.customId)
-  if (!m) return
+  const match = /^plan(?::(approve|revise|term)|fb):(\w+)$/.exec(i.customId)
+  if (!match) return
   if (!cfg.allowFrom.includes(i.user.id)) {
-    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
-  const [, action, key] = m
+  const [, action, key] = match
   const p = plans.get(key)
   if (!p) {
-    await i.reply({ content: '這個計畫已經處理過了。', ephemeral: true })
+    await i.reply({ content: m.planHandled, ephemeral: true })
     return
   }
   if (action === 'revise') {
     const input = new TextInputBuilder()
       .setCustomId('text')
-      .setLabel('要修改的地方')
+      .setLabel(m.whatToChange)
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true)
     await (i as ButtonInteraction).showModal(
       new ModalBuilder()
         .setCustomId(`planfb:${key}`)
-        .setTitle('繼續修改計畫')
+        .setTitle(m.revisePlan)
         .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input)),
     )
     return
@@ -915,14 +916,14 @@ async function handlePlanInteraction(i: ButtonInteraction | ModalSubmitInteracti
   let footer: string
   if (action === 'approve') {
     ipcSend(p.sock, { t: 'plan_result', approved: true })
-    footer = `**✅ 已核准**（${i.user.username}）`
+    footer = m.approvedBy(i.user.username)
   } else if (action === 'term') {
     ipcSend(p.sock, { t: 'ask_result' })
-    footer = `-# ⌨️ 改在終端機回答（${i.user.username}）`
+    footer = m.answeringInTerminal(i.user.username)
   } else {
     const feedback = (i as ModalSubmitInteraction).fields.getTextInputValue('text').trim()
     ipcSend(p.sock, { t: 'plan_result', approved: false, feedback })
-    footer = `**✏️ 要求修改**（${i.user.username}）\n${quoteLines(feedback)}`
+    footer = `${m.revisionRequested(i.user.username)}\n${quoteLines(feedback)}`
   }
   const opts = { content: `${p.content}\n\n${footer}`.slice(0, 2000), components: [] }
   if (i.isModalSubmit() && !i.isFromMessage()) await i.reply(opts)
@@ -960,12 +961,12 @@ const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir())
 /** `new <dir> [prompt]`: launch `ccd` in a detached tmux session; its channel appears once it registers. */
 async function startNewSession(r: Replier, dirArg: string | undefined, prompt: string | undefined) {
   if (!dirArg) {
-    await r.reply('用法：`!new <資料夾> [第一句話]`，例如 `!new ~/proj 幫我看一下測試為什麼失敗`')
+    await r.reply(m.newUsage)
     return
   }
   const dir = resolve(expandHome(dirArg))
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
-    await r.reply(`⚠️ 找不到資料夾 \`${dir}\``)
+    await r.reply(m.folderNotFound(dir))
     return
   }
   await launchInTmux(r, dir, prompt ? [prompt.trim()] : [])
@@ -974,7 +975,7 @@ async function startNewSession(r: Replier, dirArg: string | undefined, prompt: s
 /** `resume` for an ended session: `ccd --resume <id>` in tmux; the channel moves back when it registers. */
 async function resumeSession(r: Replier, sessionId: string, st: SessionState) {
   if (!statSync(st.cwd, { throwIfNoEntry: false })?.isDirectory()) {
-    await r.reply(`⚠️ 找不到資料夾 \`${st.cwd}\``)
+    await r.reply(m.folderNotFound(st.cwd))
     return
   }
   await launchInTmux(r, st.cwd, ['--resume', sessionId])
@@ -991,7 +992,7 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
     ';', 'set-option', '-t', name, 'remain-on-exit', 'on',
   ])
   const panePid = Number(stdout.trim())
-  const status = await r.reply(`🚀 已在 tmux \`${name}\` 啟動，等待 session 註冊…\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
+  const status = await r.reply(m.starting(name))
 
   const answered = new Set<RegExp>()
   let downs = 0
@@ -1002,7 +1003,7 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
     const t = trackedByPid(panePid)
     if (t?.st.channelId) {
       await run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {})
-      await status.edit(`✅ 已啟動 \`${name}\` → <#${t.st.channelId}>\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
+      await status.edit(m.started(name, t.st.channelId))
       return
     }
     let dead: string
@@ -1010,12 +1011,12 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
       screen = (await run('tmux', ['capture-pane', '-p', '-t', name])).stdout
       dead = (await run('tmux', ['display-message', '-p', '-t', name, '#{pane_dead} #{pane_dead_status}'])).stdout.trim()
     } catch {
-      await status.edit(`⚠️ tmux \`${name}\` 已經結束，Claude Code 可能啟動失敗。`)
+      await status.edit(m.tmuxGone(name))
       return
     }
     if (dead.startsWith('1')) {
       await run('tmux', ['kill-session', '-t', name]).catch(() => {})
-      await status.edit(`⚠️ Claude Code 啟動失敗（exit ${dead.split(' ')[1] || '?'}），最後的畫面：\n${screenBlock(screen)}`)
+      await status.edit(m.startFailed(dead.split(' ')[1] || '?', screenBlock(screen)))
       return
     }
     const prompt = STARTUP_PROMPTS.find(p => p.re.test(screen) && !answered.has(p.re))
@@ -1030,11 +1031,11 @@ async function launchInTmux(r: Replier, dir: string, args: string[]) {
       await run('tmux', ['send-keys', '-t', name, key])
     }
   }
-  await status.edit(`⚠️ ${NEW_TIMEOUT_MS / 1000} 秒內沒看到 session 啟動，目前畫面：\n${screenBlock(screen)}`)
+  await status.edit(m.startTimeout(NEW_TIMEOUT_MS / 1000, screenBlock(screen)))
 }
 
 function screenBlock(screen: string): string {
-  const tail = screen.split('\n').filter(l => l.trim()).slice(-20).join('\n') || '(空白)'
+  const tail = screen.split('\n').filter(l => l.trim()).slice(-20).join('\n') || m.emptyScreen
   return '```\n' + tail.replace(/```/g, 'ˋˋˋ').slice(-1700) + '\n```'
 }
 
@@ -1094,21 +1095,21 @@ async function typeInto(
   peer: Socket | undefined,
   text: string,
   tmuxKeys: string[][],
-): Promise<{ via?: 'tmux' | '終端機'; error?: string }> {
+): Promise<{ via?: string; error?: string }> {
   const tmux = tmuxPaneOf(pid)
   if (tmux) {
     try {
       for (const keys of tmuxKeys) await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, ...keys])
-      return { via: 'tmux' }
+      return { via: m.viaTmux }
     } catch (e: any) {
       return { error: e?.message ?? String(e) }
     }
   }
   if (peer) {
     const r = await typeViaPeer(peer, text)
-    return r.ok ? { via: '終端機' } : { error: r.error }
+    return r.ok ? { via: m.viaTerminal } : { error: r.error }
   }
-  return { error: '這個 session 沒有在 tmux 裡，也沒有載入 discord-sync channel' }
+  return { error: m.noWayToType }
 }
 
 /**
@@ -1119,28 +1120,28 @@ async function typeInto(
 async function stopSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   if (t.live?.status !== 'busy') {
     // Esc on an idle prompt is harmless once, but a double Esc opens the rewind menu.
-    await r.reply('Claude 目前沒在工作。')
+    await r.reply(m.notBusy)
     return
   }
   const pid = t.live.pid
   const { via, error } = await typeInto(pid, peer, '\x1b', [['Escape']])
   if (error) {
     if (!peer) {
-      await r.reply(`⚠️ 送不出 Esc：${error}`)
+      await r.reply(m.escFailed(error))
       return
     }
     setStopFlag(t)
-    await r.reply(`⚠️ 送不出 Esc（${error}），改成在 Claude 下一次使用工具前停止。`)
+    await r.reply(m.escFailedFallback(error))
     return
   }
   r.react('⏹️')
-  const reply = await r.reply(`⏹️ 已送出 Esc（${via}），確認中…`)
+  const reply = await r.reply(m.escSent(via!))
   await Bun.sleep(4000)
   if (t.live?.pid === pid && t.live.status === 'busy' && peer) {
     setStopFlag(t)
-    await reply.edit('⏹️ 已送出 Esc，但 Claude 看起來還在工作，會在它下一次使用工具前停止。')
+    await reply.edit(m.stillBusy)
   } else {
-    await reply.edit('⏹️ 已中斷。')
+    await reply.edit(m.interrupted)
   }
 }
 
@@ -1151,26 +1152,26 @@ async function endSession(t: Tracked, r: Replier, peer: Socket | undefined) {
   if (t.live?.status === 'busy') {
     const { error } = await typeInto(pid, peer, '\x1b', [['Escape']])
     if (error) {
-      await r.reply(`⚠️ 沒辦法中斷目前的工作：${error}`)
+      await r.reply(m.cantInterrupt(error))
       return
     }
     await Bun.sleep(1500)
   }
   const { via, error } = await typeInto(pid, peer, '/exit\r', [['-l', '/exit'], ['Enter']])
   if (error) {
-    await r.reply(`⚠️ 沒辦法結束：${error}`)
+    await r.reply(m.cantEnd(error))
     return
   }
-  const reply = await r.reply(`👋 已送出 \`/exit\`（${via}），等待 session 結束…`)
+  const reply = await r.reply(m.exitSent(via!))
   const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
     await Bun.sleep(1000)
     if (!tracked.has(t.sessionId)) {
-      await reply.edit('👋 Session 已結束，之後可以在這裡輸入 `/resume` 或 `!resume` 恢復。').catch(() => {})
+      await reply.edit(m.endedCanResume).catch(() => {})
       return
     }
   }
-  await reply.edit('⚠️ 送出 `/exit` 後 15 秒 session 還在，可能有對話框擋住了。').catch(() => {})
+  await reply.edit(m.exitTimeout).catch(() => {})
 }
 
 // ---- commands: !text, /slash and the console share these --------------------
@@ -1187,8 +1188,8 @@ type Replier = {
 function messageReplier(msg: Message): Replier {
   return {
     reply: async text => {
-      const m = await msg.reply(text)
-      return { edit: t => m.edit(t) }
+      const sent = await msg.reply(text)
+      return { edit: t => sent.edit(t) }
     },
     react: emoji => void msg.react(emoji).catch(() => {}),
   }
@@ -1204,8 +1205,8 @@ function interactionReplier(i: RepliableInteraction, ephemeral = false): Replier
         await i.editReply(text)
         return { edit: t => i.editReply(t) }
       }
-      const m = await i.followUp({ content: text, ephemeral })
-      return { edit: t => i.webhook.editMessage(m, { content: t }) }
+      const sent = await i.followUp({ content: text, ephemeral })
+      return { edit: t => i.webhook.editMessage(sent, { content: t }) }
     },
     react: () => {},
   }
@@ -1222,30 +1223,34 @@ async function runCommand(r: Replier, channelId: string, cmd: Command, dir?: str
     if (cmd === 'migrate') return await migrateToForum(r)
     const t = trackedByChannel(channelId)
     if (cmd === 'resume') {
-      if (t) return void (await r.reply('這個 session 還在執行中。'))
+      if (t) return void (await r.reply(m.stillRunning))
       const ended = endedByChannel(channelId)
-      if (!ended) return void (await r.reply('這裡不是 session 頻道。'))
+      if (!ended) return void (await r.reply(m.notSessionChannel))
       return await resumeSession(r, ...ended)
     }
-    if (!t) return void (await r.reply(endedByChannel(channelId) ? '這個 session 已經結束了。' : '這裡不是 session 頻道。'))
+    if (!t) return void (await r.reply(endedByChannel(channelId) ? m.alreadyEnded : m.notSessionChannel))
     const peer = t.live ? peers.get(t.live.pid) : undefined
     if (cmd === 'stop') return await stopSession(t, r, peer)
     return await endSession(t, r, peer)
   } catch (e: any) {
-    await r.reply(`⚠️ 失敗：${e?.message ?? e}`).catch(() => {})
+    await r.reply(m.failed(String(e?.message ?? e))).catch(() => {})
   }
 }
 
+/** English description plus a zh-TW localization; Discord shows each user their own language. */
+const described = <T extends { setDescription(d: string): T; setDescriptionLocalizations(l: Record<string, string>): T }>(
+  b: T,
+  key: keyof typeof SLASH_DESCRIPTIONS,
+) => b.setDescription(SLASH_DESCRIPTIONS[key].en).setDescriptionLocalizations({ 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'] })
+
 const SLASH_COMMANDS = [
-  new SlashCommandBuilder()
-    .setName('new')
-    .setDescription('在 tmux 裡開一個新的 Claude Code session')
-    .addStringOption(o => o.setName('dir').setDescription('資料夾').setRequired(true).setAutocomplete(true))
-    .addStringOption(o => o.setName('prompt').setDescription('第一句話（選填）')),
-  new SlashCommandBuilder().setName('stop').setDescription('中斷這個 session 目前的工作（按 Esc）'),
-  new SlashCommandBuilder().setName('end').setDescription('結束這個 session（/exit）'),
-  new SlashCommandBuilder().setName('resume').setDescription('恢復這個已結束的 session'),
-  new SlashCommandBuilder().setName('migrate').setDescription('把舊的已結束頻道搬到論壇'),
+  described(new SlashCommandBuilder().setName('new'), 'new')
+    .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
+    .addStringOption(o => described(o.setName('prompt'), 'prompt')),
+  described(new SlashCommandBuilder().setName('stop'), 'stop'),
+  described(new SlashCommandBuilder().setName('end'), 'end'),
+  described(new SlashCommandBuilder().setName('resume'), 'resume'),
+  described(new SlashCommandBuilder().setName('migrate'), 'migrate'),
 ]
 
 /** Autocomplete for /new: subfolders of what's typed so far, then recently used folders. */
@@ -1276,17 +1281,17 @@ function dirSuggestions(typed: string): { name: string; value: string }[] {
 let consoleRendered = ''
 let consoleEditedAt = 0
 
-const statusIcon = (status?: string) => (status === 'busy' ? '🟡 工作中' : status === 'idle' ? '🟢 閒置' : '⏳ 等待中')
+const statusIcon = (status?: string) => (status === 'busy' ? m.busy : status === 'idle' ? m.idle : m.waiting)
 const channelLabel = (st: SessionState) => {
   const name = guild.channels.cache.get(st.channelId)?.name
-  return st.archiveThreadId === st.channelId ? '🗂️' : name ? `#${name}` : '（頻道已刪除）'
+  return st.archiveThreadId === st.channelId ? '🗂️' : name ? `#${name}` : m.channelDeleted
 }
 
 /** Coarse on purpose: the console is re-rendered whenever this text changes. */
 function ago(ms: number | undefined): string {
   if (!ms) return ''
   const h = Math.floor((Date.now() - ms) / 3_600_000)
-  return h < 1 ? '1 小時內' : h < 24 ? `${h} 小時前` : `${Math.floor(h / 24)} 天前`
+  return h < 1 ? m.withinHour : h < 24 ? m.hoursAgo(h) : m.daysAgo(Math.floor(h / 24))
 }
 
 /** What a session was about: its title, else the last thing the user said. */
@@ -1294,7 +1299,7 @@ const sessionTopic = (st: SessionState) => st.title || (st.lastPrompt ? `「${st
 
 function sessionOption(sid: string, st: SessionState) {
   const label = [channelLabel(st), sessionTopic(st)].filter(Boolean).join(' · ')
-  const description = [st.ended ? `結束於 ${ago(st.endedAt)}` : '', st.cwd].filter(Boolean).join(' · ')
+  const description = [st.ended ? m.endedAgo(ago(st.endedAt)) : '', st.cwd].filter(Boolean).join(' · ')
   return { label: clip(label, 100), description: clip(description, 100), value: sid }
 }
 
@@ -1309,14 +1314,14 @@ function recentEnded(n: number): [string, SessionState][] {
 function consoleView() {
   const live = [...tracked.values()].filter(t => t.live)
   const ended = recentEnded(25)
-  const lines = ['## 🖥️ Claude Sessions', '**執行中**']
-  if (!live.length) lines.push('-# （沒有）')
+  const lines = ['## 🖥️ Claude Sessions', m.running]
+  if (!live.length) lines.push(m.none)
   for (const t of live) {
     const topic = sessionTopic(t.st)
     lines.push(`${statusIcon(t.live!.status)} · <#${t.st.channelId}> · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
   }
-  lines.push('', '**最近結束**')
-  if (!ended.length) lines.push('-# （沒有）')
+  lines.push('', m.recentlyEnded)
+  if (!ended.length) lines.push(m.none)
   for (const [, st] of ended.slice(0, 10)) {
     const topic = sessionTopic(st)
     lines.push(`⚫ <#${st.channelId}> · ${ago(st.endedAt)} · \`${st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
@@ -1331,16 +1336,16 @@ function consoleView() {
     )
   const busy = live.filter(t => t.live!.status === 'busy').map(t => [t.sessionId, t.st] as [string, SessionState])
   const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = []
-  if (busy.length) components.push(menu('console:stop', '⏹️ 中斷工作中的 session…', busy))
-  if (live.length) components.push(menu('console:end', '👋 結束 session…', live.map(t => [t.sessionId, t.st])))
-  if (ended.length) components.push(menu('console:resume', '▶️ 恢復已結束的 session…', ended))
+  if (busy.length) components.push(menu('console:stop', m.stopMenu, busy))
+  if (live.length) components.push(menu('console:end', m.endMenu, live.map(t => [t.sessionId, t.st])))
+  if (ended.length) components.push(menu('console:resume', m.resumeMenu, ended))
   const buttons = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('console:new').setLabel('開新 session').setEmoji('🆕').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('console:new').setLabel(m.newSession).setEmoji('🆕').setStyle(ButtonStyle.Primary),
   )
   const legacy = forumAvailable() ? legacyArchived().length : 0
   if (legacy) {
     buttons.addComponents(
-      new ButtonBuilder().setCustomId('console:migrate').setLabel(`把 ${legacy} 個舊頻道搬到論壇`).setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('console:migrate').setLabel(m.migrateButton(legacy)).setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
     )
   }
   components.push(buttons)
@@ -1356,7 +1361,7 @@ async function consoleChannel(): Promise<TextChannel | undefined> {
     type: ChannelType.GuildText,
     parent: state.categoryId,
     position: 0,
-    topic: '所有 Claude Code session 的狀態；也可以在這裡輸入 /new 或 !new',
+    topic: m.consoleTopic,
   })
   state.consoleChannelId = ch.id
   state.consoleMessageId = undefined
@@ -1384,26 +1389,26 @@ async function updateConsole() {
     }
   }
   // First run, or someone deleted the message: post a fresh one.
-  const m = await ch.send({ ...view, allowedMentions: { parse: [] } })
-  state.consoleMessageId = m.id
+  const sent = await ch.send({ ...view, allowedMentions: { parse: [] } })
+  state.consoleMessageId = sent.id
   stateDirty = true
   consoleRendered = rendered
 }
 
 async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
   if (!cfg.allowFrom.includes(i.user.id)) {
-    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
   if (i.isButton() && i.customId === 'console:new') {
-    const dir = new TextInputBuilder().setCustomId('dir').setLabel('資料夾').setStyle(TextInputStyle.Short).setRequired(true)
+    const dir = new TextInputBuilder().setCustomId('dir').setLabel(m.folder).setStyle(TextInputStyle.Short).setRequired(true)
     const last = recentEnded(1)[0]?.[1].cwd ?? [...tracked.values()][0]?.st.cwd
     if (last) dir.setPlaceholder(clip(last, 100))
-    const prompt = new TextInputBuilder().setCustomId('prompt').setLabel('第一句話（選填）').setStyle(TextInputStyle.Paragraph).setRequired(false)
+    const prompt = new TextInputBuilder().setCustomId('prompt').setLabel(m.firstMessage).setStyle(TextInputStyle.Paragraph).setRequired(false)
     await i.showModal(
       new ModalBuilder()
         .setCustomId('console:newmodal')
-        .setTitle('開新 session')
+        .setTitle(m.newSession)
         .addComponents(
           new ActionRowBuilder<TextInputBuilder>().addComponents(dir),
           new ActionRowBuilder<TextInputBuilder>().addComponents(prompt),
@@ -1424,7 +1429,7 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
   if (!i.isStringSelectMenu()) return
   const action = i.customId.slice('console:'.length) as Command
   const st = state.sessions[i.values[0]]
-  if (!st || !COMMANDS.includes(action)) return void (await r.reply('找不到這個 session。'))
+  if (!st || !COMMANDS.includes(action)) return void (await r.reply(m.sessionNotFound))
   await runCommand(r, st.channelId, action)
   consoleRendered = '' // Reset the menu's selection on the next tick.
 }
@@ -1473,7 +1478,7 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
     peers.set(msg.claudePid, sock)
     log(`channel server connected for pid ${msg.claudePid}`)
     const t = trackedByPid(msg.claudePid)
-    if (t) await post(t, ['-# 🔗 discord-sync channel 已連線，可以在這裡對話'])
+    if (t) await post(t, [m.channelConnected])
     return
   }
   const t = self.pid ? trackedByPid(self.pid) : undefined
@@ -1487,15 +1492,15 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
     } catch {}
     const body = chunk(
       [
-        `🔐 **需要權限：${msg.tool_name}**`,
+        m.permissionNeeded(msg.tool_name),
         msg.description,
         '```json\n' + preview.slice(0, 1200) + '\n```',
-        `-# 也可以回覆 \`yes ${msg.request_id}\` / \`no ${msg.request_id}\``,
+        m.permissionReplyHint(msg.request_id),
       ].join('\n'),
     )[0]
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`perm:allow:${self.pid}:${msg.request_id}`).setLabel('允許').setEmoji('✅').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`perm:deny:${self.pid}:${msg.request_id}`).setLabel('拒絕').setEmoji('❌').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`perm:allow:${self.pid}:${msg.request_id}`).setLabel(m.allow).setEmoji('✅').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`perm:deny:${self.pid}:${msg.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
     )
     const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
     await enqueue(ch.id, () =>

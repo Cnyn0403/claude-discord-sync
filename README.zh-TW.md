@@ -5,8 +5,8 @@
 把本機每個 Claude Code session 同步到各自的 Discord 頻道，並且能從 Discord 操作 session：跟 Claude 對話、用下拉選單回答它的問題、用按鈕核准計畫和權限、中斷它，也能用手機開新 session、結束或恢復 session。
 
 > 這是非官方的社群專案，跟 Anthropic 沒有關係。它用到 Claude Code 的 *channels* 功能（research preview）和 Claude Code 內部的 session 檔案，所以 Claude Code 更新後可能會壞掉。
->
-> Discord 上的文字（按鈕、狀態訊息、頻道名稱）目前是繁體中文。
+
+Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` 切換，**預設是英文**，要用中文請設成 `"zh-TW"`。
 
 ```
  Discord guild                        本機
@@ -67,7 +67,7 @@ chmod 600 ~/.claude/channels/discord-sync/.env
 建立 `~/.claude/channels/discord-sync/config.json`，至少要填你的 Discord user ID。取得方式：設定 → 進階 → 開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。
 
 ```json
-{ "allowFrom": ["你的 Discord user ID"] }
+{ "language": "zh-TW", "allowFrom": ["你的 Discord user ID"] }
 ```
 
 檢查設定（唯讀，不會改任何東西）：
@@ -121,6 +121,7 @@ ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd -
 
 ```json
 {
+  "language": "zh-TW",
   "guildId": "123456789012345678",
   "allowFrom": ["你的 Discord user ID"],
   "categoryName": "Claude Sessions",
@@ -138,11 +139,12 @@ ccd                 # 等同 claude，所有參數都會傳過去，例如 ccd -
 
 | 設定 | 說明 |
 |---|---|
+| `language` | `"en"`（預設）或 `"zh-TW"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
 | `guildId` | 要用的伺服器。bot 只在一個伺服器時會自動偵測 |
 | `allowFrom` | 可以對 session 說話、按按鈕、下指令的 Discord user ID，其他人會被標上 🚫 |
 | `categoryName` | session 頻道所在的分類 |
-| `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立 |
-| `archiveForumName` | 封存用的論壇；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |
+| `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立。預設是 `claude-控制台`（英文介面是 `claude-console`） |
+| `archiveForumName` | 封存用的論壇，預設是 `claude-已結束`（英文介面是 `claude-archive`）；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |
 | `archiveCategoryName` | 沒用論壇時的封存分類；設成 `""` 就讓頻道留在原地 |
 | `deleteEndedAfterDays` | 封存幾天後刪除；設成 `0` 就永遠保留 |
 | `kinds` | 要同步的 session 類型，對應 `~/.claude/sessions/<pid>.json` 裡的 `kind` |

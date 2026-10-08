@@ -1,6 +1,7 @@
 import { readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { setLanguage, m, type Language } from './i18n'
 
 export const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 export const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions')
@@ -14,6 +15,8 @@ const OFFICIAL_DIR = join(CLAUDE_DIR, 'channels', 'discord')
 
 export type Config = {
   token: string
+  /** Language of the Discord-facing text: "en" (default) or "zh-TW". */
+  language: Language
   /** Guild to create channels in. Auto-detected when the bot is in exactly one guild. */
   guildId?: string
   /** Discord user IDs allowed to talk to sessions and answer permission prompts. */
@@ -72,20 +75,22 @@ export function loadConfig(): Config {
   if (!token) {
     throw new Error(`DISCORD_BOT_TOKEN not found (env, ${join(STATE_DIR, '.env')}, or ${join(OFFICIAL_DIR, '.env')})`)
   }
+  const language = setLanguage(file.language)
   const officialAccess = readJson<{ allowFrom?: string[] }>(join(OFFICIAL_DIR, 'access.json'))
   return {
     token,
+    language,
     guildId: file.guildId,
     allowFrom: file.allowFrom ?? officialAccess?.allowFrom ?? [],
     categoryName: file.categoryName ?? 'Claude Sessions',
-    archiveForumName: file.archiveForumName ?? 'claude-已結束',
+    archiveForumName: file.archiveForumName ?? m.archiveForumName,
     archiveCategoryName: file.archiveCategoryName ?? 'Claude Sessions (ended)',
     kinds: file.kinds ?? ['interactive'],
     backlog: file.backlog ?? 15,
     showToolCalls: file.showToolCalls ?? true,
     notifyMinBusySec: file.notifyMinBusySec ?? 15,
     attachOver: file.attachOver ?? 3800,
-    consoleChannelName: file.consoleChannelName ?? 'claude-控制台',
+    consoleChannelName: file.consoleChannelName ?? m.consoleChannelName,
     deleteEndedAfterDays: file.deleteEndedAfterDays ?? 7,
   }
 }

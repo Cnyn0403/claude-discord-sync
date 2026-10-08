@@ -5,6 +5,8 @@
  */
 
 /** `plain` is the unformatted text of a user message, used to label sessions. */
+import { m } from './i18n'
+
 export type Block = { kind: 'user' | 'assistant' | 'tool' | 'question' | 'info'; text: string; plain?: string }
 
 export type RenderContext = {
@@ -51,7 +53,7 @@ function renderUserText(raw: string): Block | undefined {
   if (bash) return { kind: 'info', text: `-# 💻 ${code('! ' + bash[1])}` }
   const text = stripNoise(raw)
   if (!text) return undefined
-  return { kind: 'user', text: `👤 **本地輸入**\n${quote(text)}`, plain: text }
+  return { kind: 'user', text: `${m.localInput}\n${quote(text)}`, plain: text }
 }
 
 function summarizeTool(name: string, input: any, ctx: RenderContext): Block | undefined {
@@ -62,13 +64,13 @@ function summarizeTool(name: string, input: any, ctx: RenderContext): Block | un
       const opts = (q.options ?? [])
         .map((o: any, j: number) => `  **${j + 1}.** ${o.label}${o.description ? ` — ${o.description}` : ''}`)
         .join('\n')
-      return `**❓ ${input.questions.length > 1 ? `(${i + 1}) ` : ''}${q.question}**${q.multiSelect ? '（可複選）' : ''}\n${opts}`
+      return `**❓ ${input.questions.length > 1 ? `(${i + 1}) ` : ''}${q.question}**${q.multiSelect ? m.multiSelect : ''}\n${opts}`
     })
     return { kind: 'question', text: parts.join('\n\n') }
   }
   if (name === 'ExitPlanMode' && typeof input.plan === 'string') {
     if (ctx.askOnDiscord) return undefined
-    return { kind: 'question', text: `📋 **計畫待確認**\n${input.plan}` }
+    return { kind: 'question', text: `${m.planPending}\n${input.plan}` }
   }
   // Our own tools post their own output.
   if (name.startsWith('mcp__discord-sync__')) return undefined
@@ -123,14 +125,14 @@ export function renderRecord(o: any, ctx: RenderContext): Block[] {
     const texts: string[] = []
     for (const item of c) {
       if (item?.type === 'text' && typeof item.text === 'string') texts.push(item.text)
-      else if (item?.type === 'image') texts.push('[圖片]')
+      else if (item?.type === 'image') texts.push(m.image)
       else if (item?.type === 'tool_result') {
         const tool = ctx.toolNames.get(item.tool_use_id)
         if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') {
           const body = typeof item.content === 'string' ? item.content : (item.content ?? []).map((x: any) => x?.text ?? '').join('\n')
           out.push({ kind: 'info', text: `-# ↳ ${code(body, 300)}` })
         } else if (item.is_error && ctx.showToolCalls) {
-          out.push({ kind: 'tool', text: `-# ⚠️ ${tool ?? 'tool'} 失敗` })
+          out.push({ kind: 'tool', text: m.toolFailed(tool ?? 'tool') })
         }
       }
     }
@@ -208,7 +210,7 @@ export function pack(blocks: Block[], attachOver = Infinity): Post[] {
       cur = ''
     }
     if (standalone && b.text.length > attachOver) {
-      out.push({ content: chunk(b.text, MAX - 40)[0] + '\n-# 📎 全文見附檔', file: b.text })
+      out.push({ content: chunk(b.text, MAX - 40)[0] + '\n' + m.fullTextAttached, file: b.text })
     } else if (standalone) {
       out.push(...chunk(b.text))
     } else {
