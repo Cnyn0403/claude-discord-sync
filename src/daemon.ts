@@ -32,6 +32,7 @@ import {
   type RepliableInteraction,
   AttachmentBuilder,
   SlashCommandBuilder,
+  cleanContent,
 } from 'discord.js'
 import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
@@ -1826,7 +1827,9 @@ async function endMeeting(t: Tracked, msg: Message, peer: Socket) {
     '',
     ...msgs.map(x => {
       const files = [...x.attachments.values()].map(a => `\n  [attachment: ${a.name} ${a.url}]`).join('')
-      return `**${x.author.username}** (${roleTag(x.author.id, t.st)}) ${time(x.createdAt)}: ${x.cleanContent.replace(botMention, '').trim()}${files}`
+      // Drop the bot's tag before mentions are turned into @names.
+      const text = cleanContent(x.content.replace(botMention, ''), ch)
+      return `**${x.author.username}** (${roleTag(x.author.id, t.st)}) ${time(x.createdAt)}: ${text.trim()}${files}`
     }),
   ].join('\n')
   mkdirSync(INBOX_DIR, { recursive: true })
