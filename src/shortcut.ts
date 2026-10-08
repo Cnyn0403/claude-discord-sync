@@ -65,6 +65,21 @@ export function shortcutOnPath(): boolean {
   }
 }
 
+/** Windows: remove SHORTCUT_DIR from the user PATH. */
+export function removeFromUserPath(): void {
+  const dir = SHORTCUT_DIR.replace(/'/g, "''")
+  execFileSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `$p = [Environment]::GetEnvironmentVariable('Path','User'); if ($p) { [Environment]::SetEnvironmentVariable('Path', (($p -split ';') | Where-Object { $_ -and $_ -ne '${dir}' }) -join ';', 'User') }`,
+    ],
+    { windowsHide: true },
+  )
+}
+
 /** Windows: add SHORTCUT_DIR to the user PATH (without setx, which truncates long values). */
 export function addToUserPath(): void {
   const dir = SHORTCUT_DIR.replace(/'/g, "''")

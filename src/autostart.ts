@@ -45,15 +45,28 @@ export function logHint(): string {
   return IS_WIN ? WIN_LOG : IS_MAC ? MAC_LOG : `journalctl --user -u ${NAME} -f`
 }
 
+/** Windows: stop running daemons (the Startup script can't restart one that's already up). */
+function stopWindowsDaemons() {
+  try {
+    sh('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='${NAME}.exe'" | Where-Object { $_.CommandLine -match ' daemon' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
+    ])
+  } catch {}
+}
+
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-/** Install the login item and (re)start the daemon through it. */
+/** Install (or refresh) the login item and (re)start the daemon through it. */
 export function installAutostart(): void {
   if (IS_WIN) {
     // wscript runs the daemon with no console window (style 0) and returns immediately.
     const cmdline = selfCommand('daemon', '--log', WIN_LOG).map(a => `"${a}"`).join(' ')
     mkdirSync(dirname(STARTUP_SCRIPT), { recursive: true })
     writeFileSync(STARTUP_SCRIPT, `CreateObject("WScript.Shell").Run "${cmdline.replace(/"/g, '""')}", 0, False\r\n`)
+    stopWindowsDaemons()
     sh('wscript.exe', [STARTUP_SCRIPT])
   } else if (IS_MAC) {
     const args = selfCommand('daemon')
@@ -120,14 +133,7 @@ export function removeAutostart(): boolean {
   if (!autostartInstalled()) return false
   if (IS_WIN) {
     rmSync(STARTUP_SCRIPT, { force: true })
-    try {
-      sh('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Get-CimInstance Win32_Process -Filter "Name='${NAME}.exe'" | Where-Object { $_.CommandLine -match ' daemon' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
-      ])
-    } catch {}
+    stopWindowsDaemons()
   } else if (IS_MAC) {
     try {
       sh('launchctl', ['bootout', `gui/${process.getuid!()}/${LABEL}`])

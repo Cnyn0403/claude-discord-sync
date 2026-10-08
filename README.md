@@ -86,8 +86,8 @@ Claude Code asks you to confirm the development channel on startup, because cust
 |---|---|
 | Check the setup (read-only) | `claude-discord-sync doctor` |
 | Change settings | run `claude-discord-sync setup` again, or edit `~/.claude/channels/discord-sync/config.json` |
-| Update | run the install command again |
-| Uninstall | `claude-discord-sync uninstall` (removes autostart and `ccd`, keeps your config) |
+| Update | `claude-discord-sync update` downloads the latest release, verifies it and restarts the daemon (`--pre` includes prereleases) |
+| Uninstall | `claude-discord-sync uninstall` removes the program, autostart and `ccd`, and asks whether to delete your config and token too |
 
 The executables are not code-signed. If Windows SmartScreen or macOS Gatekeeper complains, that's why; the installer verifies the checksum of what it downloaded.
 

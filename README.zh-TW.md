@@ -86,8 +86,8 @@ ccd                 # 所有參數都會傳過去，例如 ccd --resume
 |---|---|
 | 檢查設定（唯讀） | `claude-discord-sync doctor` |
 | 修改設定 | 再執行一次 `claude-discord-sync setup`，或直接編輯 `~/.claude/channels/discord-sync/config.json` |
-| 更新 | 再執行一次安裝指令 |
-| 解除安裝 | `claude-discord-sync uninstall`（移除自動啟動和 `ccd`，保留你的設定） |
+| 更新 | `claude-discord-sync update` 會下載最新版、驗證後替換，並重新啟動 daemon（加上 `--pre` 會包含測試版） |
+| 解除安裝 | `claude-discord-sync uninstall` 會移除程式、自動啟動和 `ccd`，並詢問要不要一併刪除設定和 token |
 
 執行檔沒有程式碼簽章，所以 Windows SmartScreen 或 macOS Gatekeeper 可能會跳出警告；安裝程式已經驗證過下載檔案的 checksum。
 

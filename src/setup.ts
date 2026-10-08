@@ -4,12 +4,12 @@
  * shortcut, and starting the daemon at login. Safe to run again: existing
  * answers are offered as defaults and nothing is overwritten without asking.
  */
-import { createInterface } from 'readline'
 import { mkdirSync, writeFileSync, chmodSync } from 'fs'
 import { CONFIG_FILE, ENV_FILE, STATE_DIR, findToken, readConfigFile } from './config'
 import { IS_WIN, hasTmux } from './platform'
 import { installShortcut, shortcutOnPath, addToUserPath, SHORTCUT, SHORTCUT_DIR } from './shortcut'
 import { installAutostart, autostartInstalled, daemonRunning, logHint } from './autostart'
+import { ask, confirm as confirmYN, askHidden } from './prompt'
 
 const text = {
   en: {
@@ -58,8 +58,6 @@ const text = {
       '  3. A channel for the session appears under "Claude Sessions" in your server.',
       '\nCheck everything any time with: claude-discord-sync doctor',
     ].join('\n'),
-    yes: 'Y/n',
-    no: 'y/N',
   },
   'zh-TW': {
     welcome: '\nclaude-discord-sync 安裝設定\n',
@@ -107,65 +105,9 @@ const text = {
       '  3. 伺服器的「Claude Sessions」分類裡會出現這個 session 的頻道。',
       '\n隨時可以用這個指令檢查：claude-discord-sync doctor',
     ].join('\n'),
-    yes: 'Y/n',
-    no: 'y/N',
   },
 }
 type Text = (typeof text)['en']
-
-// ---- terminal input -----------------------------------------------------------
-
-function ask(question: string, fallback = ''): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  const suffix = fallback ? ` [${fallback}] ` : ' '
-  return new Promise(resolve =>
-    rl.question(question + suffix, answer => {
-      rl.close()
-      resolve(answer.trim() || fallback)
-    }),
-  )
-}
-
-async function confirm(t: Text, question: string, dflt = true): Promise<boolean> {
-  const a = (await ask(`${question} (${dflt ? t.yes : t.no})`)).toLowerCase()
-  return a ? a.startsWith('y') : dflt
-}
-
-/** Read a line without echoing it (shows * per character). */
-function askHidden(question: string): Promise<string> {
-  const stdin = process.stdin
-  if (!stdin.isTTY) return ask(question)
-  process.stdout.write(question)
-  return new Promise(resolve => {
-    let value = ''
-    stdin.setRawMode(true)
-    stdin.resume()
-    stdin.setEncoding('utf8')
-    const onData = (chunk: string) => {
-      for (const c of chunk) {
-        if (c === '\r' || c === '\n') {
-          stdin.setRawMode(false)
-          stdin.pause()
-          stdin.off('data', onData)
-          process.stdout.write('\n')
-          resolve(value.trim())
-          return
-        }
-        if (c === '\u0003') process.exit(130)
-        if (c === '\u007f' || c === '\b') {
-          if (value) {
-            value = value.slice(0, -1)
-            process.stdout.write('\b \b')
-          }
-        } else if (c >= ' ') {
-          value += c
-          process.stdout.write('*')
-        }
-      }
-    }
-    stdin.on('data', onData)
-  })
-}
 
 // ---- Discord REST -------------------------------------------------------------
 
@@ -198,7 +140,7 @@ async function main() {
   console.log(t.step(1, t.tokenTitle))
   let token = findToken()
   let app = token ? await discord<App>(token, '/applications/@me') : undefined
-  if (!(app && token && (await confirm(t, t.keepToken(app.bot?.username ?? app.name))))) {
+  if (!(app && token && (await confirmYN(t.keepToken(app.bot?.username ?? app.name))))) {
     console.log(t.botGuide)
     for (;;) {
       token = await askHidden(t.askToken)
@@ -265,7 +207,7 @@ async function main() {
 
   // 5. daemon
   console.log(t.step(5, t.autostartTitle))
-  if (await confirm(t, t.askAutostart)) {
+  if (await confirmYN(t.askAutostart)) {
     // A hand-started daemon would fight the autostarted one over the socket and the bot.
     while (!autostartInstalled() && (await daemonRunning())) await ask(t.alreadyRunning)
     try {

@@ -28,7 +28,8 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bun build --compile --minify --target=${{ matrix.target }} src/cli.ts --outfile dist/${{ matrix.asset }}
+      # CDS_BUILD_VERSION lets `version` and `update` know the exact tag, prereleases included.
+      - run: bun build --compile --minify --define 'CDS_BUILD_VERSION="${{ github.ref_name }}"' --target=${{ matrix.target }} src/cli.ts --outfile dist/${{ matrix.asset }}
       - name: Ad-hoc sign
         if: runner.os == 'macOS'
         run: codesign --sign - --force dist/${{ matrix.asset }}
