@@ -22,6 +22,7 @@ const MAX = 1900
 /** Inline code span that survives backticks in the content. */
 function code(s: string, max = 160): string {
   const one = s.replace(/\s+/g, ' ').trim()
+  if (!one) return ''
   const cut = one.length > max ? one.slice(0, max - 1) + '…' : one
   return '`' + cut.replace(/`/g, 'ˋ') + '`'
 }
