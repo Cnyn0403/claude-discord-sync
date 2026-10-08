@@ -144,12 +144,13 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 
 ## 會議模式
 
-想跟分享進來的人討論，但不想每句話都傳給 Claude 時：
+想跟分享 session 的人討論事情，又不想洗版 session 頻道、污染 Claude 的上下文時：
 
-1. **開始：**在 session 頻道裡 tag 某個人（不是 bot），bot 會宣布進入會議模式，之後的訊息都只在你們之間。
-2. **結束：**tag bot。這則訊息的其他內容就是結論，例如「@bot 決定用 A 方案，順便記錄到 docs/decisions.md」。如果只 tag 沒寫內容，Claude 會自己讀完討論、整理重點並提出下一步。
+1. **開始：**在 session 頻道 tag 某個人（不是 bot）。bot 會在那則訊息上開一個討論串，並把被 tag 的人加進去。session 頻道照常運作。
+2. **問 Claude：**在討論串裡 tag bot 並寫上問題，會由一個唯讀的 session 分身回答。它知道到目前為止的對話，也能讀檔案（Read、Grep、Glob），但不能修改任何東西，問答也不會進到原本的 session。背後是在背景執行 `claude -p --resume <session> --fork-session`，所以每個問題都會像一般請求一樣計費。
+3. **結束：**`@bot end`，後面可以接結論（「@bot end 就用方案 A」）。討論串會被關閉，Claude 會收到整段討論的 Markdown 檔（誰說了什麼、各自的角色、分身的回答，附件會下載到本機），加上結論。沒寫結論的話，Claude 會整理討論內容並提出下一步建議。
 
-Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼）和結論。一則訊息同時 tag 了人和 bot，會當成一般訊息傳給 Claude，不會開始會議。會議期間一樣可以用 `yes abcde` 回答權限請求；會議如果 30 分鐘沒人說話，bot 會提醒一次，但不會自己把會議內容送給 Claude。
+只有看得到 session 頻道的人才能加入（用 `/share` 分享）。會議 30 分鐘沒人說話時，bot 會提醒一次；它不會自己把會議交給 Claude。同時 tag 人和 bot 的訊息會當成一般訊息交給 Claude，不會開會議。
 
 ## 暫停同步
 

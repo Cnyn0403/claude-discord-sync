@@ -144,12 +144,13 @@ This needs the bot's **Manage Roles** permission. Without it the daemon logs a w
 
 ## Meetings
 
-To talk things over with the people you shared a session with, without every message going to Claude:
+To talk things over with the people you shared a session with, without cluttering the session channel or Claude's context:
 
-1. **Start:** @-mention someone (not the bot) in the session channel. The bot announces meeting mode, and from then on messages stay among you.
-2. **Finish:** @-mention the bot. Whatever else that message says is the conclusion ("@bot let's go with option A, and record it in docs/decisions.md"). With nothing else, Claude reads the discussion, summarizes it and proposes next steps.
+1. **Start:** @-mention someone (not the bot) in the session channel. The bot opens a thread on that message and adds the people mentioned. The session channel carries on as usual.
+2. **Ask Claude:** in the thread, @-mention the bot with a question. A read-only copy of the session answers: it knows the conversation so far and can read files (Read, Grep, Glob), but can't change anything, and the questions don't reach the session itself. Under the hood it's a headless `claude -p --resume <session> --fork-session`, so each question costs a normal request.
+3. **Finish:** `@bot end`, optionally followed by the conclusion ("@bot end let's go with option A"). The thread is closed and Claude receives the whole discussion as a Markdown file (who said what, with their role, the copy's answers, attachments saved locally) plus the conclusion. With no conclusion, Claude summarizes the discussion and proposes next steps.
 
-Claude receives the whole discussion as a Markdown file (who said what, with their role) plus the conclusion. A message mentioning both a person and the bot is a normal message to Claude, not a meeting. Permission replies (`yes abcde`) still work during a meeting, and the bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own.
+Only people who can see the session channel can join (use `/share`). The bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own. A message mentioning both a person and the bot is a normal message to Claude, not a meeting.
 
 ## Pausing
 

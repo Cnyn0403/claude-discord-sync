@@ -186,10 +186,19 @@ const en = {
   resumeAll: 'Resume all',
 
   // meetings
-  meetingStarted: '🗣️ **Meeting mode.** Messages here are not sent to Claude for now. When you\'re done, @-mention me with the conclusion (or just @-mention me and Claude reads the discussion).',
+  meetingStarted: (bot: string) =>
+    `🗣️ **Meeting thread.** Talk it over here; nothing reaches the session until you finish.\n` +
+    `- ${bot} + a question: a read-only copy of Claude that knows the session so far answers (it can read files but not change anything).\n` +
+    `- ${bot} \`end\` + the conclusion (optional): closes the thread and hands the whole discussion to Claude.`,
+  meetingAlready: (threadId: string) => `🗣️ A meeting is already open: <#${threadId}>`,
+  meetingThreadName: (time: string) => `Meeting ${time}`,
+  meetingAskHint: (bot: string) => `Ask a question after ${bot}, or \`${bot} end\` to finish the meeting.`,
+  meetingAskFailed: (error: string) => `⚠️ The read-only copy couldn't answer: ${error}`,
+  meetingEndedChannel: (threadId: string, conclusion?: string) =>
+    `📨 Meeting <#${threadId}> is over; the discussion went to Claude.${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
   meetingNoAccess: (names: string) => `⚠️ ${names} can't see this channel; use \`/share\` to let them in.`,
-  meetingEnded: (n: number) => `📨 Meeting over: sent the discussion (${n} messages) to Claude.`,
-  meetingIdle: '🗣️ The meeting has been quiet for 30 minutes. @-mention me with the conclusion to hand it to Claude.',
+  meetingEnded: (n: number) => `📨 Meeting over: sent the discussion (${n} messages) to Claude. This thread is now closed.`,
+  meetingIdle: (bot: string) => `🗣️ The meeting has been quiet for 30 minutes. \`${bot} end\` + the conclusion hands it to Claude.`,
   meetingLastPrompt: '(meeting notes)',
 } as const
 
@@ -363,10 +372,19 @@ const zhTW: Messages = {
   pauseAll: '全部暫停',
   resumeAll: '全部恢復',
 
-  meetingStarted: '🗣️ **會議模式**：接下來的訊息不會傳給 Claude。討論完後 tag 我並寫上結論（或只 tag 我，讓 Claude 自己看討論內容）。',
+  meetingStarted: bot =>
+    `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。\n` +
+    `- ${bot} 加上問題：由一個唯讀的 Claude 分身回答，它知道 session 到目前為止的內容（可以讀檔案，但不能修改任何東西）。\n` +
+    `- ${bot} \`end\` 加上結論（選填）：關閉討論串，把整段討論交給 Claude。`,
+  meetingAlready: threadId => `🗣️ 已經有一個進行中的會議：<#${threadId}>`,
+  meetingThreadName: time => `會議 ${time}`,
+  meetingAskHint: bot => `在 ${bot} 後面寫上問題，或用 \`${bot} end\` 結束會議。`,
+  meetingAskFailed: error => `⚠️ 唯讀分身無法回答：${error}`,
+  meetingEndedChannel: (threadId, conclusion) =>
+    `📨 會議 <#${threadId}> 結束了，討論內容已交給 Claude。${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
   meetingNoAccess: names => `⚠️ ${names} 看不到這個頻道，可以用 \`/share\` 分享給他。`,
-  meetingEnded: n => `📨 會議結束：已把討論內容（${n} 則訊息）交給 Claude。`,
-  meetingIdle: '🗣️ 會議已經 30 分鐘沒有人說話了。討論完後 tag 我並寫上結論，就會交給 Claude。',
+  meetingEnded: n => `📨 會議結束：已把討論內容（${n} 則訊息）交給 Claude，這個討論串已關閉。`,
+  meetingIdle: bot => `🗣️ 會議已經 30 分鐘沒有人說話了。用 \`${bot} end\` 加上結論，就會交給 Claude。`,
   meetingLastPrompt: '（會議記錄）',
 }
 
