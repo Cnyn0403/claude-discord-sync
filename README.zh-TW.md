@@ -121,6 +121,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/unshare @某人` | session 頻道 | 取消分享 |
 | `/members` | session 頻道 | 列出誰可以存取這個 session |
 | `/sync off`／`/sync on` | session 頻道，或在其他地方對所有 session | 暫停／恢復同步（見[暫停同步](#暫停同步)） |
+| `/model <名稱>` | session 頻道 | 切換模型（`opus`、`sonnet`、`haiku`、`fable`、`default` 或模型 ID）。做法是在 session 裡輸入 `/model`，所以 Claude 必須是閒置狀態。跟在本機輸入一樣，也會變成新 session 的預設模型 |
 | `yes abcde` / `no abcde` | session 頻道 | 用代碼回答權限請求 |
 
 每個指令都可以改用 `!new`、`!stop`、`!sync off` 這種寫法。

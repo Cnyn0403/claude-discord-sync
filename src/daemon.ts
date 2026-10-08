@@ -38,7 +38,7 @@ import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { homedir } from 'os'
-import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync, openSync, readSync, closeSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
@@ -658,7 +658,7 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|migrate|sync)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|migrate|sync|model)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
     if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' ? 'chat' : 'owner')) {
@@ -669,6 +669,12 @@ client.on('messageCreate', async (msg: Message) => {
       const on = (cmd[2] ?? '').trim().toLowerCase()
       if (on !== 'on' && on !== 'off') return void (await msg.reply(m.syncUsage))
       await setSync(messageReplier(msg), msg.channelId, on === 'on', msg.author.username)
+      return
+    }
+    if (name === 'model') {
+      const model = (cmd[2] ?? '').trim()
+      if (!model) return void (await msg.reply(m.modelUsage))
+      await setModel(messageReplier(msg), msg.channelId, model)
       return
     }
     const [dir, ...prompt] = (cmd[2] ?? '').split(/(?<=^\S+)\s+/)
@@ -744,6 +750,11 @@ client.on('messageCreate', async (msg: Message) => {
 client.on('interactionCreate', async (i: Interaction) => {
   if (i.isAutocomplete() && i.commandName === 'new') {
     await i.respond(dirSuggestions(String(i.options.getFocused()))).catch(() => {})
+    return
+  }
+  if (i.isAutocomplete() && i.commandName === 'model') {
+    const typed = String(i.options.getFocused()).toLowerCase()
+    await i.respond(MODEL_ALIASES.filter(a => a.includes(typed)).map(a => ({ name: a, value: a }))).catch(() => {})
     return
   }
   if (i.isChatInputCommand() && (SESSION_COMMANDS as readonly string[]).includes(i.commandName)) {
@@ -1453,6 +1464,9 @@ const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('sync'), 'sync').addStringOption(o =>
     described(o.setName('state'), 'syncState').setRequired(true).addChoices(choice('off', 'syncOff'), choice('on', 'syncOn')),
   ),
+  described(new SlashCommandBuilder().setName('model'), 'model').addStringOption(o =>
+    described(o.setName('name'), 'modelName').setRequired(true).setAutocomplete(true),
+  ),
 ]
 
 /** Autocomplete for /new: subfolders of what's typed so far, then recently used folders. */
@@ -1918,7 +1932,7 @@ async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
@@ -1935,9 +1949,66 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
   await i.deferReply()
   const r = interactionReplier(i)
   if (i.commandName === 'sync') return setSync(r, i.channelId, i.options.getString('state') === 'on', i.user.username)
+  if (i.commandName === 'model') return setModel(r, i.channelId, i.options.getString('name', true).trim())
   const user = i.options.getUser('user', true)
   if (user.bot) return void (await r.reply(m.cantShareWithBot))
   await share(r, i.channelId, user.id, i.commandName === 'share' ? (i.options.getString('role', true) as Role) : undefined)
+}
+
+// ---- /model --------------------------------------------------------------------
+
+/** Suggestions for /model; anything matching MODEL_NAME_RE (a full model ID too) is accepted. */
+const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable', 'default']
+/** Typed into the terminal, so nothing that could end the line or press a key. */
+const MODEL_NAME_RE = /^[\w.:\[\]-]{1,80}$/
+
+/** Type `/model <name>` into the idle session, then report what Claude Code answered. */
+async function setModel(r: Replier, channelId: string, name: string) {
+  const t = trackedByChannel(channelId)
+  if (!t?.live) return void (await r.reply(t || endedByChannel(channelId) ? m.alreadyEnded : m.notSessionChannel))
+  if (!MODEL_NAME_RE.test(name)) return void (await r.reply(m.badModelName))
+  // While Claude works, typed text would sit in the input box until the turn ends.
+  if (t.live.status === 'busy') return void (await r.reply(m.busyTryLater))
+  const transcript = t.st.transcript
+  const offset = transcript ? (statSync(transcript, { throwIfNoEntry: false })?.size ?? 0) : 0
+  const { via, error } = await typeInto(t.live.pid, peers.get(t.live.pid), [{ text: `/model ${name}` }, 'Enter'])
+  if (error) return void (await r.reply(m.cantType(error)))
+  const reply = await r.reply(m.modelSent(name, via!))
+  if (!transcript) return
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+    await Bun.sleep(1000)
+    const out = commandOutputSince(transcript, offset)
+    if (out !== undefined) return void (await reply.edit(m.modelResult(out)).catch(() => {}))
+  }
+}
+
+/** The first local command output (`<local-command-stdout>`) written to the transcript after `offset`. */
+function commandOutputSince(file: string, offset: number): string | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    const size = statSync(file).size
+    if (size <= offset) return undefined
+    const buf = Buffer.alloc(Math.min(size - offset, 1024 * 1024))
+    readSync(fd, buf, 0, buf.length, offset)
+    for (const line of buf.toString('utf8').split('\n')) {
+      let rec: any
+      try {
+        rec = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const content = rec?.message?.content
+      const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((c: any) => c?.text ?? '').join('') : ''
+      const match = /<local-command-std(?:out|err)>([\s\S]*?)<\/local-command-std(?:out|err)>/.exec(text)
+      if (match) return match[1].replace(/\x1b\[[0-9;]*m/g, '').trim()
+    }
+  } catch {
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+  return undefined
 }
 
 // ---- channel-server connections -------------------------------------------
