@@ -60,11 +60,12 @@ cd ~/claude-discord-sync
 bun install
 
 mkdir -p ~/.claude/channels/discord-sync
-echo 'DISCORD_BOT_TOKEN=你的 token' > ~/.claude/channels/discord-sync/.env
+cp .env.example ~/.claude/channels/discord-sync/.env
 chmod 600 ~/.claude/channels/discord-sync/.env
+# 編輯這個檔案，把 bot token 貼在 DISCORD_BOT_TOKEN= 後面
 ```
 
-建立 `~/.claude/channels/discord-sync/config.json`，至少要填你的 Discord user ID。取得方式：設定 → 進階 → 開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。
+建立 `~/.claude/channels/discord-sync/config.json`，至少要填你的 Discord user ID，所有選項可以參考 [`config.example.json`](config.example.json)。取得方式：設定 → 進階 → 開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。
 
 ```json
 { "language": "zh-TW", "allowFrom": ["你的 Discord user ID"] }

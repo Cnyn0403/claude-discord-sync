@@ -60,11 +60,12 @@ cd ~/claude-discord-sync
 bun install
 
 mkdir -p ~/.claude/channels/discord-sync
-echo 'DISCORD_BOT_TOKEN=your-token' > ~/.claude/channels/discord-sync/.env
+cp .env.example ~/.claude/channels/discord-sync/.env
 chmod 600 ~/.claude/channels/discord-sync/.env
+# edit it and paste your bot token after DISCORD_BOT_TOKEN=
 ```
 
-Create `~/.claude/channels/discord-sync/config.json` with at least your Discord user ID (Settings → Advanced → Developer Mode, then right-click your name → *Copy User ID*):
+Create `~/.claude/channels/discord-sync/config.json` with at least your Discord user ID (Settings → Advanced → Developer Mode, then right-click your name → *Copy User ID*). [`config.example.json`](config.example.json) lists every option; the minimum is:
 
 ```json
 { "allowFrom": ["your Discord user ID"] }

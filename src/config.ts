@@ -69,8 +69,9 @@ export function loadConfig(): Config {
   mkdirSync(STATE_DIR, { recursive: true })
   const file = readJson<Partial<Config>>(join(STATE_DIR, 'config.json')) ?? {}
   const token =
-    process.env.DISCORD_BOT_TOKEN ??
-    readEnvFile(join(STATE_DIR, '.env')).DISCORD_BOT_TOKEN ??
+    // || rather than ??: an empty value (e.g. an unfilled .env.example copy) falls through.
+    process.env.DISCORD_BOT_TOKEN ||
+    readEnvFile(join(STATE_DIR, '.env')).DISCORD_BOT_TOKEN ||
     readEnvFile(join(OFFICIAL_DIR, '.env')).DISCORD_BOT_TOKEN
   if (!token) {
     throw new Error(`DISCORD_BOT_TOKEN not found (env, ${join(STATE_DIR, '.env')}, or ${join(OFFICIAL_DIR, '.env')})`)
