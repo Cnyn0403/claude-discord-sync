@@ -26,8 +26,9 @@
 | 計畫確認 | 同一個 hook 也會攔截 `ExitPlanMode`：頻道貼出計畫和「核准 / 繼續修改 / 改在終端機回答」按鈕，「繼續修改」會跳出文字框，內容會當成修改意見交回 Claude。計畫太長時訊息只放預覽，完整內容附成 `plan.md` |
 | 完成通知 | Claude 工作超過 `notifyMinBusySec` 秒後回到閒置時，貼一則「✅ Claude 完成了」並 @ 你 |
 | 長回覆 | 超過 `attachOver` 字的回覆只貼預覽，全文附成 `reply.md` |
-| 開新 session | 在 guild 任一頻道輸入 `!new <資料夾> [第一句話]`，daemon 會在背景 tmux 裡執行 `ccd`，並自動對開發者 channel、信任資料夾這兩個啟動確認畫面按 Enter。頻道建立後會回覆連結，本機可以用 `tmux attach -t ccd-xxxx` 接手 |
+| 開新 session | 在 guild 任一頻道輸入 `!new <資料夾> [第一句話]`，daemon 會在背景 tmux 裡執行 `ccd`，並自動接受開發者 channel、信任資料夾這兩個啟動確認畫面（會把游標移到「Yes」再按 Enter）。如果啟動失敗，會把 tmux 最後的畫面貼回頻道。頻道建立後會回覆連結，本機可以用 `tmux attach -t ccd-xxxx` 接手 |
 | 中斷 | 在 session 頻道輸入 `!stop`：session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude 的終端機。如果送不出 Esc，或 4 秒後 Claude 還在工作，就改用 `bin/stop-hook.sh` 這個 PreToolUse hook，在 Claude 下一次使用工具前停止 |
+| 結束 / 恢復 | 在 session 頻道輸入 `!end`：Claude 在工作的話先中斷，再輸入 `/exit`（方式跟 `!stop` 一樣，tmux 或 `TIOCSTI`）。在已結束的頻道輸入 `!resume`，會在 tmux 裡執行 `ccd --resume <session ID>`，頻道移回原分類後繼續同步 |
 | 選擇題 | `ccd` 會掛一個 `AskUserQuestion` 的 PreToolUse hook（`src/ask-hook.ts`）：daemon 在頻道貼出下拉選單並 @ 你，選完後答案經由 `updatedInput.answers` 交回 Claude。選單裡有「其他（自己輸入）」可以開文字框；按「改在終端機回答」或逾時（`DISCORD_SYNC_ASK_TIMEOUT` 秒，預設 600）就回到本地對話框 |
 | 狀態 | Claude 工作中時頻道會顯示「正在輸入…」；session 結束後頻道移到「Claude Sessions (ended)」分類，用 `--resume` 回來時會移回原分類 |
 

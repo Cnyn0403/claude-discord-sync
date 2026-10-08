@@ -5,7 +5,7 @@ export type ClientMsg =
   | { t: 'hello'; claudePid: number }
   | { t: 'permission_request'; request_id: string; tool_name: string; description: string; input_preview: string }
   | { t: 'send_file'; id: number; path: string; caption?: string }
-  | { t: 'interrupt_result'; ok: boolean; error?: string }
+  | { t: 'type_result'; ok: boolean; error?: string }
   /** From ask-hook.ts (its own connection, no hello): AskUserQuestion to answer on Discord. */
   | { t: 'ask'; sessionId: string; questions: AskQuestion[] }
   /** From ask-hook.ts: ExitPlanMode plan to approve or send back on Discord. */
@@ -26,8 +26,8 @@ export type DaemonMsg =
   /** question text -> answer; undefined = answer in the local terminal instead. */
   | { t: 'ask_result'; answers?: Record<string, string> }
   | { t: 'plan_result'; approved: boolean; feedback?: string }
-  /** !stop: press Esc in the session's terminal. */
-  | { t: 'interrupt' }
+  /** !stop / !end: type keys into the session's terminal (e.g. Esc, "/exit\r"). */
+  | { t: 'type'; text: string }
 
 export function send(sock: Socket, msg: ClientMsg | DaemonMsg): void {
   if (!sock.destroyed) sock.write(JSON.stringify(msg) + '\n')

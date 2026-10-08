@@ -9,7 +9,7 @@
  *   Discord message      -> notifications/claude/channel            -> session
  *   permission prompt    -> daemon (buttons in the session channel)
  *   button / "yes xxxxx" -> notifications/claude/channel/permission -> session
- *   !stop                -> Esc injected into the session's terminal
+ *   !stop / !end         -> Esc or "/exit" typed into the session's terminal
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -51,17 +51,21 @@ const mcp = new Server(
 const TIOCSTI = 0x5412
 
 /**
- * Press Esc in Claude Code's TUI. We inherit its controlling terminal, and
+ * Type into Claude Code's TUI. We inherit its controlling terminal, and
  * TIOCSTI queues bytes as if typed there. Linux 6.2+ can disable TIOCSTI
  * (dev.tty.legacy_tiocsti=0); the daemon then falls back to a stop hook.
  */
-function injectEsc(): { ok: boolean; error?: string } {
+function typeKeys(text: string): { ok: boolean; error?: string } {
   let fd: number | undefined
   try {
     const libc = dlopen('libc.so.6', { ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 } })
     fd = openSync('/dev/tty', 'r+')
-    const rc = libc.symbols.ioctl(fd, TIOCSTI, ptr(new Uint8Array([0x1b])))
-    return rc === 0 ? { ok: true } : { ok: false, error: 'TIOCSTI rejected' }
+    // TIOCSTI queues one byte per call.
+    const bytes = new TextEncoder().encode(text)
+    for (let i = 0; i < bytes.length; i++) {
+      if (libc.symbols.ioctl(fd, TIOCSTI, ptr(bytes, i)) !== 0) return { ok: false, error: 'TIOCSTI rejected' }
+    }
+    return { ok: true }
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) }
   } finally {
@@ -98,8 +102,8 @@ function connectDaemon() {
         method: 'notifications/claude/channel/permission',
         params: { request_id: msg.request_id, behavior: msg.behavior },
       })
-    } else if (msg.t === 'interrupt') {
-      toDaemon({ t: 'interrupt_result', ...injectEsc() })
+    } else if (msg.t === 'type') {
+      toDaemon({ t: 'type_result', ...typeKeys(msg.text) })
     } else if (msg.t === 'result') {
       pending.get(msg.id)?.(msg)
       pending.delete(msg.id)

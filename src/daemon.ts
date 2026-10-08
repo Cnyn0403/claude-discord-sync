@@ -374,7 +374,13 @@ client.on('messageCreate', async (msg: Message) => {
     return
   }
   const t = trackedByChannel(msg.channelId)
-  if (!t) return
+  if (!t) {
+    if (/^!resume\s*$/i.test(msg.content)) {
+      if (!cfg.allowFrom.includes(msg.author.id)) void msg.react('🚫').catch(() => {})
+      else await resumeSession(msg).catch(e => void msg.reply(`⚠️ 恢復失敗：${e?.message ?? e}`).catch(() => {}))
+    }
+    return
+  }
   if (!cfg.allowFrom.includes(msg.author.id)) {
     void msg.react('🚫').catch(() => {})
     return
@@ -382,6 +388,14 @@ client.on('messageCreate', async (msg: Message) => {
   const peer = t.live ? peers.get(t.live.pid) : undefined
   if (/^!stop\s*$/i.test(msg.content)) {
     await stopSession(t, msg, peer).catch(e => void msg.reply(`⚠️ 停止失敗：${e?.message ?? e}`).catch(() => {}))
+    return
+  }
+  if (/^!end\s*$/i.test(msg.content)) {
+    await endSession(t, msg, peer).catch(e => void msg.reply(`⚠️ 結束失敗：${e?.message ?? e}`).catch(() => {}))
+    return
+  }
+  if (/^!resume\s*$/i.test(msg.content)) {
+    await msg.reply('這個 session 還在執行中。')
     return
   }
   if (!peer) {
@@ -674,8 +688,22 @@ const CCD = resolve(import.meta.dir, '..', 'bin', 'ccd')
 const NEW_TIMEOUT_MS = 45_000
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
-/** Startup dialogs a headless ccd would hang on; Enter picks the default (accept). */
-const STARTUP_PROMPTS = [/development channel/i, /trust (this folder|the files)/i]
+/**
+ * Startup dialogs a headless ccd would hang on, and the option that accepts them.
+ * The cursor (❯) is moved down to that option before pressing Enter, since the
+ * default is not always the accepting one (the trust dialog defaults to "No, exit").
+ */
+const STARTUP_PROMPTS: { re: RegExp; accept?: RegExp }[] = [
+  { re: /development channel/i },
+  { re: /Is this a project you created or one you trust/i, accept: /Yes, I trust this folder/i },
+]
+
+/** Keys to press for a startup dialog: Enter if the cursor is on the accepting option, else Down. */
+function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down' {
+  if (!accept) return 'Enter'
+  const cursor = screen.split('\n').find(l => /^\s*❯/.test(l))
+  return !cursor || accept.test(cursor) ? 'Enter' : 'Down'
+}
 
 /** `!new <dir> [prompt]`: launch `ccd` in a detached tmux session; its channel appears once it registers. */
 async function startNewSession(msg: Message) {
@@ -689,39 +717,77 @@ async function startNewSession(msg: Message) {
     await msg.reply(`⚠️ 找不到資料夾 \`${dir}\``)
     return
   }
+  await launchInTmux(msg, dir, m[2] ? [m[2].trim()] : [])
+}
+
+/** `!resume` in an ended session's channel: `ccd --resume <id>` in tmux; the channel moves back when it registers. */
+async function resumeSession(msg: Message) {
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === msg.channelId)
+  if (!entry) return
+  const [sessionId, st] = entry
+  if (!statSync(st.cwd, { throwIfNoEntry: false })?.isDirectory()) {
+    await msg.reply(`⚠️ 找不到資料夾 \`${st.cwd}\``)
+    return
+  }
+  await launchInTmux(msg, st.cwd, ['--resume', sessionId])
+}
+
+/** Run ccd with `args` in a detached tmux session and report its channel once it registers. */
+async function launchInTmux(msg: Message, dir: string, args: string[]) {
   const name = `ccd-${Math.random().toString(36).slice(2, 6)}`
-  const cmd = `exec ${shq(CCD)}${m[2] ? ' ' + shq(m[2].trim()) : ''}`
+  const cmd = ['exec', CCD, ...args].map((a, i) => (i ? shq(a) : a)).join(' ')
   // `exec` makes the pane's process Claude Code itself, so pane_pid identifies the session.
-  const { stdout } = await run('tmux', ['new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', name, '-x', '200', '-y', '50', '-c', dir, cmd])
+  // remain-on-exit keeps the screen around if it dies during startup, so we can show why.
+  const { stdout } = await run('tmux', [
+    'new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', name, '-x', '200', '-y', '50', '-c', dir, cmd,
+    ';', 'set-option', '-t', name, 'remain-on-exit', 'on',
+  ])
   const panePid = Number(stdout.trim())
   const status = await msg.reply(`🚀 已在 tmux \`${name}\` 啟動，等待 session 註冊…\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
 
   const answered = new Set<RegExp>()
+  let downs = 0
   const deadline = Date.now() + NEW_TIMEOUT_MS
   let screen = ''
   while (Date.now() < deadline) {
     await Bun.sleep(1000)
     const t = trackedByPid(panePid)
     if (t?.st.channelId) {
+      await run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {})
       await status.edit(`✅ 已啟動 \`${name}\` → <#${t.st.channelId}>\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
       return
     }
+    let dead: string
     try {
       screen = (await run('tmux', ['capture-pane', '-p', '-t', name])).stdout
+      dead = (await run('tmux', ['display-message', '-p', '-t', name, '#{pane_dead} #{pane_dead_status}'])).stdout.trim()
     } catch {
       await status.edit(`⚠️ tmux \`${name}\` 已經結束，Claude Code 可能啟動失敗。`)
       return
     }
-    const prompt = STARTUP_PROMPTS.find(re => re.test(screen) && !answered.has(re))
+    if (dead.startsWith('1')) {
+      await run('tmux', ['kill-session', '-t', name]).catch(() => {})
+      await status.edit(`⚠️ Claude Code 啟動失敗（exit ${dead.split(' ')[1] || '?'}），最後的畫面：\n${screenBlock(screen)}`)
+      return
+    }
+    const prompt = STARTUP_PROMPTS.find(p => p.re.test(screen) && !answered.has(p.re))
     if (prompt) {
-      answered.add(prompt)
-      await run('tmux', ['send-keys', '-t', name, 'Enter'])
+      const key = downs < 5 ? dialogKey(screen, prompt.accept) : 'Enter'
+      if (key === 'Enter') {
+        answered.add(prompt.re)
+        downs = 0
+      } else {
+        downs++
+      }
+      await run('tmux', ['send-keys', '-t', name, key])
     }
   }
-  const tail = screen.split('\n').filter(l => l.trim()).slice(-20).join('\n')
-  await status.edit(
-    `⚠️ ${NEW_TIMEOUT_MS / 1000} 秒內沒看到 session 啟動，目前畫面：\n\`\`\`\n${tail.replace(/```/g, 'ˋˋˋ').slice(0, 1700)}\n\`\`\``,
-  )
+  await status.edit(`⚠️ ${NEW_TIMEOUT_MS / 1000} 秒內沒看到 session 啟動，目前畫面：\n${screenBlock(screen)}`)
+}
+
+function screenBlock(screen: string): string {
+  const tail = screen.split('\n').filter(l => l.trim()).slice(-20).join('\n') || '(空白)'
+  return '```\n' + tail.replace(/```/g, 'ˋˋˋ').slice(-1700) + '\n```'
 }
 
 // ---- !stop: interrupt the current turn ---------------------------------------
@@ -756,7 +822,7 @@ function tmuxPaneOf(pid: number): { socket: string; pane: string } | undefined {
   }
 }
 
-function interruptViaPeer(peer: Socket): Promise<{ ok: boolean; error?: string }> {
+function typeViaPeer(peer: Socket, text: string): Promise<{ ok: boolean; error?: string }> {
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       interruptWaiters.delete(peer)
@@ -767,8 +833,34 @@ function interruptViaPeer(peer: Socket): Promise<{ ok: boolean; error?: string }
       interruptWaiters.delete(peer)
       resolve(r)
     })
-    ipcSend(peer, { t: 'interrupt' })
+    ipcSend(peer, { t: 'type', text })
   })
+}
+
+/**
+ * Type into the session: via tmux when it runs in tmux (`tmuxKeys` are send-keys
+ * argument lists), otherwise through the channel server's terminal (`text`).
+ */
+async function typeInto(
+  pid: number,
+  peer: Socket | undefined,
+  text: string,
+  tmuxKeys: string[][],
+): Promise<{ via?: 'tmux' | '終端機'; error?: string }> {
+  const tmux = tmuxPaneOf(pid)
+  if (tmux) {
+    try {
+      for (const keys of tmuxKeys) await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, ...keys])
+      return { via: 'tmux' }
+    } catch (e: any) {
+      return { error: e?.message ?? String(e) }
+    }
+  }
+  if (peer) {
+    const r = await typeViaPeer(peer, text)
+    return r.ok ? { via: '終端機' } : { error: r.error }
+  }
+  return { error: '這個 session 沒有在 tmux 裡，也沒有載入 discord-sync channel' }
 }
 
 /**
@@ -783,16 +875,7 @@ async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
     return
   }
   const pid = t.live.pid
-  const tmux = tmuxPaneOf(pid)
-  let error: string | undefined
-  if (tmux) {
-    await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, 'Escape']).catch(e => (error = e?.message ?? String(e)))
-  } else if (peer) {
-    error = (await interruptViaPeer(peer)).error
-  } else {
-    await msg.reply('⚠️ 這個 session 沒有在 tmux 裡，也沒有載入 discord-sync channel，沒辦法從這裡停止。')
-    return
-  }
+  const { via, error } = await typeInto(pid, peer, '\x1b', [['Escape']])
   if (error) {
     if (!peer) {
       await msg.reply(`⚠️ 送不出 Esc：${error}`)
@@ -803,7 +886,7 @@ async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
     return
   }
   void msg.react('⏹️').catch(() => {})
-  const reply = await msg.reply(`⏹️ 已送出 Esc（${tmux ? 'tmux' : '終端機'}），確認中…`)
+  const reply = await msg.reply(`⏹️ 已送出 Esc（${via}），確認中…`)
   await Bun.sleep(4000)
   if (t.live?.pid === pid && t.live.status === 'busy' && peer) {
     setStopFlag(t)
@@ -811,6 +894,35 @@ async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
   } else {
     await reply.edit('⏹️ 已中斷。')
   }
+}
+
+/** `!end`: interrupt if busy, then type `/exit`. The channel is archived when the process goes away. */
+async function endSession(t: Tracked, msg: Message, peer: Socket | undefined) {
+  const pid = t.live?.pid
+  if (!pid) return
+  if (t.live?.status === 'busy') {
+    const { error } = await typeInto(pid, peer, '\x1b', [['Escape']])
+    if (error) {
+      await msg.reply(`⚠️ 沒辦法中斷目前的工作：${error}`)
+      return
+    }
+    await Bun.sleep(1500)
+  }
+  const { via, error } = await typeInto(pid, peer, '/exit\r', [['-l', '/exit'], ['Enter']])
+  if (error) {
+    await msg.reply(`⚠️ 沒辦法結束：${error}`)
+    return
+  }
+  const reply = await msg.reply(`👋 已送出 \`/exit\`（${via}），等待 session 結束…`)
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await Bun.sleep(1000)
+    if (!tracked.has(t.sessionId)) {
+      await reply.edit('👋 Session 已結束，之後可以在這裡輸入 `!resume` 恢復。').catch(() => {})
+      return
+    }
+  }
+  await reply.edit('⚠️ 送出 `/exit` 後 15 秒 session 還在，可能有對話框擋住了。').catch(() => {})
 }
 
 // ---- channel-server connections -------------------------------------------
@@ -829,7 +941,7 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
     await startPlan(sock, msg.sessionId, msg.plan)
     return
   }
-  if (msg.t === 'interrupt_result') {
+  if (msg.t === 'type_result') {
     interruptWaiters.get(sock)?.(msg)
     return
   }
