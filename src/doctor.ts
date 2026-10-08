@@ -23,7 +23,14 @@ client.once('clientReady', async c => {
   console.log(`\nbot: ${c.user.tag}`)
   for (const g of c.guilds.cache.values()) {
     const me = await g.members.fetchMe()
-    const need = { ManageChannels: PermissionFlagsBits.ManageChannels, SendMessages: PermissionFlagsBits.SendMessages, AddReactions: PermissionFlagsBits.AddReactions, AttachFiles: PermissionFlagsBits.AttachFiles }
+    const need = {
+      ManageChannels: PermissionFlagsBits.ManageChannels,
+      ManageRoles: PermissionFlagsBits.ManageRoles,
+      ManageThreads: PermissionFlagsBits.ManageThreads,
+      SendMessages: PermissionFlagsBits.SendMessages,
+      AddReactions: PermissionFlagsBits.AddReactions,
+      AttachFiles: PermissionFlagsBits.AttachFiles,
+    }
     const perms = Object.entries(need).map(([k, v]) => `${me.permissions.has(v) ? '✓' : '✗'} ${k}`).join('  ')
     console.log(`  guild ${g.id}  ${g.name}\n    ${perms}`)
   }

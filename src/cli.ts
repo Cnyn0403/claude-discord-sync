@@ -14,6 +14,8 @@ import { VERSION } from './version'
 const COMMANDS: Record<string, () => Promise<unknown>> = {
   setup: () => import('./setup'),
   update: () => import('./update'),
+  pause: () => import('./pause').then(p => p.run(true)),
+  unpause: () => import('./pause').then(p => p.run(false)),
   uninstall: () => import('./uninstall'),
   doctor: () => import('./doctor'),
   daemon: () => import('./daemon'),
@@ -37,6 +39,8 @@ Usage:
   claude-discord-sync setup         set up the bot, config and autostart (interactive)
   claude-discord-sync ccd [args…]   start Claude Code with the Discord channel (same as \`ccd\`)
   claude-discord-sync doctor        check the bot, permissions and sessions (read-only)
+  claude-discord-sync pause [all]   pause mirroring: this session when run inside one (e.g. \`! claude-discord-sync pause\`), else all
+  claude-discord-sync unpause [all] resume mirroring
   claude-discord-sync daemon        run the daemon in the foreground
   claude-discord-sync update        update to the latest release (--pre: include prereleases)
   claude-discord-sync uninstall     remove the program, autostart and ccd (asks about your config)

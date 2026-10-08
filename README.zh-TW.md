@@ -117,9 +117,37 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/end` | session 頻道 | 工作中的話先中斷，再 `/exit` |
 | `/resume` | 封存貼文或已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，並建立新頻道 |
 | `/migrate` | 任何頻道 | 把用分類封存的舊頻道搬到論壇 |
+| `/share @某人 <權限>` | session 頻道 | 把這個 session 分享給某人（見[分享](#分享)） |
+| `/unshare @某人` | session 頻道 | 取消分享 |
+| `/members` | session 頻道 | 列出誰可以存取這個 session |
+| `/sync off`／`/sync on` | session 頻道，或在其他地方對所有 session | 暫停／恢復同步（見[暫停同步](#暫停同步)） |
 | `yes abcde` / `no abcde` | session 頻道 | 用代碼回答權限請求 |
 
-每個指令都可以改用 `!new`、`!stop` 這種寫法。
+每個指令都可以改用 `!new`、`!stop`、`!sync off` 這種寫法。
+
+## 分享
+
+session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看得到。要讓別人參與某個 session，在那個頻道輸入 `/share @某人 <權限>`：
+
+| | 擁有者 | 完整 | 協作 | 觀看 |
+|---|---|---|---|---|
+| 看到頻道和對話 | ✅ | ✅ | ✅ | ✅ |
+| 對 Claude 說話、回答選擇題、`/stop` | ✅ | ✅ | ✅ | |
+| 核准權限請求和計畫 | ✅ | ✅ | | |
+| `/end`、`/share`、`/new`、`/resume`、控制台 | ✅ | | | |
+
+協作者傳給 Claude 的訊息會標註他們的身分。能對 Claude 說話的人就能叫它在你的電腦上做事，請只分享給你信任的人。分享設定在 `/resume` 之後仍然有效；封存到論壇的貼文只有擁有者看得到。
+
+這個功能需要 bot 有「管理身分組」（Manage Roles）權限。沒有的話 daemon 會在 log 提示，頻道會維持全伺服器都看得到，`/share` 也無法使用。
+
+## 暫停同步
+
+接下來要處理不該出現在 Discord 上的東西時，可以暫停同步：
+
+- **在電腦上：**`claude-discord-sync pause`／`unpause`。在 Claude Code session 裡執行（`! claude-discord-sync pause`）會暫停那個 session；在其他地方執行，或加上 `all`，會暫停所有 session。
+- **在 Discord 上：**在 session 頻道輸入 `/sync off`／`/sync on`，在其他地方輸入則是對所有 session；也可以用控制台的暫停功能。
+
+暫停期間，這個 session 的內容都不會貼到 Discord（連控制台上的標題都不會更新），選擇題、計畫和權限請求都在終端機回答，從 Discord 傳的訊息也不會送給 Claude。恢復時**不會**補貼暫停期間的內容，只會顯示有幾則訊息沒有同步。
 
 ## 設定
 
@@ -147,7 +175,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 |---|---|
 | `language` | `"en"`（預設）或 `"zh-TW"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
 | `guildId` | 要用的伺服器。bot 只在一個伺服器時會自動偵測 |
-| `allowFrom` | 可以對 session 說話、按按鈕、下指令的 Discord user ID，其他人會被標上 🚫 |
+| `allowFrom` | 擁有者：對所有 session 有完整權限的 Discord user ID。其他人只能使用 session [分享](#分享)給他們的權限 |
 | `categoryName` | session 頻道所在的分類 |
 | `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立。預設是 `claude-控制台`（英文介面是 `claude-console`） |
 | `archiveForumName` | 封存用的論壇，預設是 `claude-已結束`（英文介面是 `claude-archive`）；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |

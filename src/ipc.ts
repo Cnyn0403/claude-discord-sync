@@ -8,6 +8,8 @@ export type ClientMsg =
   | { t: 'permission_request'; request_id: string; tool_name: string; description: string; input_preview: string }
   | { t: 'send_file'; id: number; path: string; caption?: string }
   | { t: 'type_result'; ok: boolean; error?: string }
+  /** From `claude-discord-sync pause|unpause` (own connection): one session (by Claude Code PID) or all. */
+  | { t: 'pause'; paused: boolean; pid?: number }
   /** From ask-hook.ts (its own connection, no hello): AskUserQuestion to answer on Discord. */
   | { t: 'ask'; sessionId: string; questions: AskQuestion[] }
   /** From ask-hook.ts: ExitPlanMode plan to approve or send back on Discord. */
@@ -30,6 +32,7 @@ export type DaemonMsg =
   | { t: 'plan_result'; approved: boolean; feedback?: string }
   /** /stop, /end: type keys into the session's terminal. */
   | { t: 'type'; keys: Key[] }
+  | { t: 'pause_result'; text: string }
 
 export function send(sock: Socket, msg: ClientMsg | DaemonMsg): void {
   if (!sock.destroyed) sock.write(JSON.stringify(msg) + '\n')

@@ -122,8 +122,11 @@ type App = { id: string; name: string; flags?: number; bot?: { username: string 
 // GATEWAY_MESSAGE_CONTENT or GATEWAY_MESSAGE_CONTENT_LIMITED
 const hasMessageContent = (app: App) => ((app.flags ?? 0) & ((1 << 18) | (1 << 19))) !== 0
 
-/** View Channels, Manage Channels, Add Reactions, Send Messages, Attach Files, Read History, Manage Threads, Create Public Threads, Send in Threads. */
-const PERMISSIONS = [10n, 4n, 6n, 11n, 15n, 16n, 34n, 35n, 38n].reduce((acc, bit) => acc | (1n << bit), 0n)
+/**
+ * View Channels, Manage Channels, Add Reactions, Send Messages, Embed Links, Attach Files, Read History,
+ * Manage Roles (private channels, /share), Manage Threads, Create Public Threads, Send in Threads.
+ */
+const PERMISSIONS = [10n, 4n, 6n, 11n, 14n, 15n, 16n, 28n, 34n, 35n, 38n].reduce((acc, bit) => acc | (1n << bit), 0n)
 
 // ---- steps ----------------------------------------------------------------------
 

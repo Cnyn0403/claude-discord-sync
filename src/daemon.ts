@@ -67,8 +67,25 @@ type SessionState = {
   lastPrompt?: string
   /** Forum post this session was archived to (reused if it ends again after a resume). */
   archiveThreadId?: string
+  /** People the owner shared this session with, by Discord user ID. */
+  members?: Record<string, Role>
+  /** Mirroring paused for this session; pausedSkipped counts what wasn't posted. */
+  paused?: boolean
+  pausedSkipped?: number
 }
+
+/**
+ * Access to a session. Owners (allowFrom) can do everything; the rest is per session:
+ * viewer = read only, collab = talk to Claude, answer questions, /stop,
+ * full = collab + approve permission prompts and plans.
+ */
+type Role = 'viewer' | 'collab' | 'full'
+type Need = 'view' | 'chat' | 'approve' | 'owner'
+const RANK = { viewer: 1, collab: 2, full: 3, owner: 4 } as const
+const NEED_RANK: Record<Need, number> = { view: 1, chat: 2, approve: 3, owner: 4 }
 type State = {
+  /** Mirroring paused for every session on this machine. */
+  pausedAll?: boolean
   guildId?: string
   categoryId?: string
   archiveCategoryId?: string
@@ -98,6 +115,30 @@ function saveState() {
   renameSync(tmp, STATE_FILE)
   stateDirty = false
 }
+
+// ---- access ------------------------------------------------------------------
+
+const isOwner = (userId: string) => cfg.allowFrom.includes(userId)
+
+function accessOf(userId: string, st: SessionState | undefined): keyof typeof RANK | undefined {
+  return isOwner(userId) ? 'owner' : st?.members?.[userId]
+}
+
+function can(userId: string, st: SessionState | undefined, need: Need): boolean {
+  const a = accessOf(userId, st)
+  return !!a && RANK[a] >= NEED_RANK[need]
+}
+
+/** Owners plus the members allowed to act on what's being announced, for @-mentions. */
+function audience(st: SessionState | undefined, need: Need): string[] {
+  const members = Object.entries(st?.members ?? {})
+    .filter(([, r]) => RANK[r] >= NEED_RANK[need])
+    .map(([id]) => id)
+  return [...new Set([...cfg.allowFrom, ...members])]
+}
+const mentionsOf = (ids: string[]) => ids.map(id => `<@${id}>`).join(' ')
+
+const isPaused = (st: SessionState) => !!(state.pausedAll || st.paused)
 
 // ---- runtime tracking ----------------------------------------------------
 
@@ -220,6 +261,7 @@ async function startTracking(s: LiveSession) {
     })
     t.st.channelId = ch.id
     t.st.offset = 0
+    await applyMembers(ch, t.st)
     // Resumed after its channel was archived to the forum or deleted.
     t.st.ended = false
     t.st.endedAt = undefined
@@ -478,6 +520,11 @@ function pump(t: Tracked) {
   }
   t.st.offset = t.tail.offset
   stateDirty = true
+  if (isPaused(t.st)) {
+    // Nothing from a paused stretch reaches Discord, not even the console's title / last prompt.
+    t.st.pausedSkipped = (t.st.pausedSkipped ?? 0) + blocks.length
+    return
+  }
   noteLastPrompt(t, blocks)
   if (blocks.length) void post(t, pack(blocks, cfg.attachOver))
   if (newTitle) {
@@ -509,14 +556,14 @@ function notifyWhenDone(t: Tracked) {
   if (status !== 'idle' || t.busySince === undefined) return
   const elapsed = Date.now() - t.busySince
   t.busySince = undefined
-  if (cfg.notifyMinBusySec < 0 || elapsed < cfg.notifyMinBusySec * 1000 || !cfg.allowFrom.length) return
+  if (cfg.notifyMinBusySec < 0 || elapsed < cfg.notifyMinBusySec * 1000 || !cfg.allowFrom.length || isPaused(t.st)) return
   // A pending question already pinged them.
   if ([...asks.values(), ...plans.values()].some(a => a.channelId === t.st.channelId)) return
-  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  const who = audience(t.st, 'chat')
   void channelOf(t).then(ch => {
     if (!ch) return
     void enqueue(ch.id, () =>
-      ch.send({ content: `${mentions} ${m.done(formatDuration(elapsed))}`, allowedMentions: { users: cfg.allowFrom } }),
+      ch.send({ content: `${mentionsOf(who)} ${m.done(formatDuration(elapsed))}`, allowedMentions: { users: who } }),
     )
   })
 }
@@ -550,7 +597,7 @@ async function tick() {
       pump(t)
       notifyWhenDone(t)
       // Typing indicator while Claude is working (lasts ~10s per call).
-      if (t.live?.status === 'busy' && Date.now() - t.lastTyping > 8000) {
+      if (t.live?.status === 'busy' && !isPaused(t.st) && Date.now() - t.lastTyping > 8000) {
         t.lastTyping = Date.now()
         void channelOf(t).then(ch => ch?.sendTyping().catch(() => {}))
       }
@@ -600,10 +647,17 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|migrate)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|migrate|sync)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
-    if (!cfg.allowFrom.includes(msg.author.id)) {
+    const name = cmd[1].toLowerCase()
+    if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' ? 'chat' : 'owner')) {
       void msg.react('🚫').catch(() => {})
+      return
+    }
+    if (name === 'sync') {
+      const on = (cmd[2] ?? '').trim().toLowerCase()
+      if (on !== 'on' && on !== 'off') return void (await msg.reply(m.syncUsage))
+      await setSync(messageReplier(msg), msg.channelId, on === 'on', msg.author.username)
       return
     }
     const [dir, ...prompt] = (cmd[2] ?? '').split(/(?<=^\S+)\s+/)
@@ -612,8 +666,12 @@ client.on('messageCreate', async (msg: Message) => {
   }
   const t = trackedByChannel(msg.channelId)
   if (!t) return
-  if (!cfg.allowFrom.includes(msg.author.id)) {
+  if (!can(msg.author.id, t.st, 'chat')) {
     void msg.react('🚫').catch(() => {})
+    return
+  }
+  if (isPaused(t.st)) {
+    void msg.reply(m.pausedReply).catch(() => {})
     return
   }
   const peer = t.live ? peers.get(t.live.pid) : undefined
@@ -625,6 +683,10 @@ client.on('messageCreate', async (msg: Message) => {
   }
   const perm = PERMISSION_REPLY_RE.exec(msg.content)
   if (perm) {
+    if (!can(msg.author.id, t.st, 'approve')) {
+      void msg.react('🚫').catch(() => {})
+      return
+    }
     const behavior = perm[1].toLowerCase().startsWith('y') ? 'allow' : 'deny'
     ipcSend(peer, { t: 'permission', request_id: perm[2].toLowerCase(), behavior })
     void msg.react(behavior === 'allow' ? '✅' : '❌').catch(() => {})
@@ -641,6 +703,8 @@ client.on('messageCreate', async (msg: Message) => {
     meta: {
       message_id: msg.id,
       user: msg.author.username,
+      // Lets Claude tell the owner from someone they shared the session with.
+      ...(isOwner(msg.author.id) ? {} : { role: t.st.members?.[msg.author.id] === 'full' ? 'collaborator (full)' : 'collaborator' }),
       ts: msg.createdAt.toISOString(),
       ...(files.length ? { attachments: files.join('; ') } : {}),
     },
@@ -653,8 +717,12 @@ client.on('interactionCreate', async (i: Interaction) => {
     await i.respond(dirSuggestions(String(i.options.getFocused()))).catch(() => {})
     return
   }
+  if (i.isChatInputCommand() && (SESSION_COMMANDS as readonly string[]).includes(i.commandName)) {
+    await handleSessionCommand(i).catch(e => log('session command failed:', e?.message ?? e))
+    return
+  }
   if (i.isChatInputCommand() && (COMMANDS as readonly string[]).includes(i.commandName)) {
-    if (!cfg.allowFrom.includes(i.user.id)) {
+    if (!can(i.user.id, sessionByChannel(i.channelId), i.commandName === 'stop' ? 'chat' : 'owner')) {
       await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
       return
     }
@@ -664,7 +732,7 @@ client.on('interactionCreate', async (i: Interaction) => {
     return
   }
   if (i.isButton() && i.customId.startsWith('resume:')) {
-    if (!cfg.allowFrom.includes(i.user.id)) {
+    if (!isOwner(i.user.id)) {
       await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
       return
     }
@@ -692,11 +760,11 @@ client.on('interactionCreate', async (i: Interaction) => {
   if (!i.isButton()) return
   const match = /^perm:(allow|deny):(\d+):([a-km-z]{5})$/.exec(i.customId)
   if (!match) return
-  if (!cfg.allowFrom.includes(i.user.id)) {
+  const [, behavior, pid, request_id] = match
+  if (!can(i.user.id, trackedByPid(Number(pid))?.st, 'approve')) {
     await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
     return
   }
-  const [, behavior, pid, request_id] = match
   const peer = peers.get(Number(pid))
   if (!peer) {
     await i.reply({ content: m.sessionDisconnected, ephemeral: true }).catch(() => {})
@@ -760,8 +828,8 @@ function askComponents(key: string, a: PendingAsk) {
 async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[]) {
   const t = tracked.get(sessionId)
   const ch = t && (await channelOf(t))
-  // Discord allows 5 component rows: up to 4 questions + the terminal button.
-  if (!ch || !questions.length || questions.length > 4) {
+  // Discord allows 5 component rows: up to 4 questions + the terminal button. Paused: answer locally.
+  if (!ch || !questions.length || questions.length > 4 || isPaused(t.st)) {
     ipcSend(sock, { t: 'ask_result' })
     return
   }
@@ -775,12 +843,12 @@ async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[
     if (a.messageId)
       void ch.messages.edit(a.messageId, { content: askContent(a, m.timedOut), components: [] }).catch(() => {})
   })
-  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  const who = audience(t.st, 'chat')
   const sent = await enqueue(ch.id, () =>
     ch.send({
-      content: clip(`${mentions}\n${askContent(a)}`, 2000),
+      content: clip(`${mentionsOf(who)}\n${askContent(a)}`, 2000),
       components: askComponents(key, a),
-      allowedMentions: { users: cfg.allowFrom },
+      allowedMentions: { users: who },
     }),
   )
   a.messageId = sent.id
@@ -789,12 +857,12 @@ async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[
 async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
   const match = /^ask(term|other)?:(\w+)(?::(\d+))?$/.exec(i.customId)
   if (!match) return
-  if (!cfg.allowFrom.includes(i.user.id)) {
+  const [, kind, key, qs] = match
+  const a = asks.get(key)
+  if (!can(i.user.id, trackedByChannel(a?.channelId ?? i.channelId ?? '')?.st, 'chat')) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
-  const [, kind, key, qs] = match
-  const a = asks.get(key)
   if (!a) {
     await i.reply({ content: m.questionClosed, ephemeral: true })
     return
@@ -857,12 +925,12 @@ const plans = new Map<string, PendingPlan>()
 async function startPlan(sock: Socket, sessionId: string, plan: string) {
   const t = tracked.get(sessionId)
   const ch = t && (await channelOf(t))
-  if (!ch) {
+  if (!ch || isPaused(t.st)) {
     ipcSend(sock, { t: 'ask_result' })
     return
   }
   const key = Math.random().toString(36).slice(2, 10)
-  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  const who = audience(t.st, 'approve')
   const full = `${m.planPending}\n${plan}`
   // Long plans: preview in the message, full text attached.
   const long = full.length > 1800
@@ -880,10 +948,10 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
   )
   const sent = await enqueue(ch.id, () =>
     ch.send({
-      content: `${mentions}\n${p.content}`.slice(0, 2000),
+      content: `${mentionsOf(who)}\n${p.content}`.slice(0, 2000),
       components: [row],
       files: long ? [new AttachmentBuilder(Buffer.from(plan, 'utf8'), { name: 'plan.md' })] : [],
-      allowedMentions: { users: cfg.allowFrom },
+      allowedMentions: { users: who },
     }),
   )
   p.messageId = sent.id
@@ -892,12 +960,12 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
 async function handlePlanInteraction(i: ButtonInteraction | ModalSubmitInteraction) {
   const match = /^plan(?::(approve|revise|term)|fb):(\w+)$/.exec(i.customId)
   if (!match) return
-  if (!cfg.allowFrom.includes(i.user.id)) {
+  const [, action, key] = match
+  const p = plans.get(key)
+  if (!can(i.user.id, trackedByChannel(p?.channelId ?? i.channelId ?? '')?.st, 'approve')) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
-  const [, action, key] = match
-  const p = plans.get(key)
   if (!p) {
     await i.reply({ content: m.planHandled, ephemeral: true })
     return
@@ -1329,6 +1397,13 @@ const described = <T extends { setDescription(d: string): T; setDescriptionLocal
   key: keyof typeof SLASH_DESCRIPTIONS,
 ) => b.setDescription(SLASH_DESCRIPTIONS[key].en).setDescriptionLocalizations({ 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'] })
 
+/** A slash command choice named in English with a zh-TW localization. */
+const choice = (value: string, key: keyof typeof SLASH_DESCRIPTIONS) => ({
+  name: SLASH_DESCRIPTIONS[key].en,
+  name_localizations: { 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'] },
+  value,
+})
+
 const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('new'), 'new')
     .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
@@ -1337,6 +1412,18 @@ const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('end'), 'end'),
   described(new SlashCommandBuilder().setName('resume'), 'resume'),
   described(new SlashCommandBuilder().setName('migrate'), 'migrate'),
+  described(new SlashCommandBuilder().setName('share'), 'share')
+    .addUserOption(o => described(o.setName('user'), 'shareUser').setRequired(true))
+    .addStringOption(o =>
+      described(o.setName('role'), 'shareRole')
+        .setRequired(true)
+        .addChoices(...(['viewer', 'collab', 'full'] as const).map(v => choice(v, `role${v[0].toUpperCase()}${v.slice(1)}` as keyof typeof SLASH_DESCRIPTIONS))),
+    ),
+  described(new SlashCommandBuilder().setName('unshare'), 'unshare').addUserOption(o => described(o.setName('user'), 'unshareUser').setRequired(true)),
+  described(new SlashCommandBuilder().setName('members'), 'members'),
+  described(new SlashCommandBuilder().setName('sync'), 'sync').addStringOption(o =>
+    described(o.setName('state'), 'syncState').setRequired(true).addChoices(choice('off', 'syncOff'), choice('on', 'syncOn')),
+  ),
 ]
 
 /** Autocomplete for /new: subfolders of what's typed so far, then recently used folders. */
@@ -1402,11 +1489,11 @@ function recentEnded(n: number): [string, SessionState][] {
 function consoleView() {
   const live = [...tracked.values()].filter(t => t.live)
   const ended = recentEnded(25)
-  const lines = ['## 🖥️ Claude Sessions', m.running]
+  const lines = ['## 🖥️ Claude Sessions', ...(state.pausedAll ? [m.allPausedBanner] : []), m.running]
   if (!live.length) lines.push(m.none)
   for (const t of live) {
     const topic = sessionTopic(t.st)
-    lines.push(`${statusIcon(t.live!.status)} · <#${t.st.channelId}> · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
+    lines.push(`${isPaused(t.st) ? m.pausedTag + ' ' : ''}${statusIcon(t.live!.status)} · <#${t.st.channelId}> · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
   }
   lines.push('', m.recentlyEnded)
   if (!ended.length) lines.push(m.none)
@@ -1427,8 +1514,27 @@ function consoleView() {
   if (busy.length) components.push(menu('console:stop', m.stopMenu, busy))
   if (live.length) components.push(menu('console:end', m.endMenu, live.map(t => [t.sessionId, t.st])))
   if (ended.length) components.push(menu('console:resume', m.resumeMenu, ended))
+  // One session at a time; while everything is paused only "resume all" makes sense.
+  if (live.length && !state.pausedAll) {
+    components.push(
+      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('console:pause')
+          .setPlaceholder(m.pauseMenu)
+          .addOptions(
+            live.slice(0, 25).map(t => {
+              const o = sessionOption(t.sessionId, t.st)
+              return { ...o, label: clip(`${t.st.paused ? '▶️' : '⏸️'} ${o.label}`, 100) }
+            }),
+          ),
+      ),
+    )
+  }
   const buttons = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
     new ButtonBuilder().setCustomId('console:new').setLabel(m.newSession).setEmoji('🆕').setStyle(ButtonStyle.Primary),
+    state.pausedAll
+      ? new ButtonBuilder().setCustomId('console:resumeall').setLabel(m.resumeAll).setEmoji('▶️').setStyle(ButtonStyle.Success)
+      : new ButtonBuilder().setCustomId('console:pauseall').setLabel(m.pauseAll).setEmoji('⏸️').setStyle(ButtonStyle.Secondary),
   )
   const legacy = forumAvailable() ? legacyArchived().length : 0
   if (legacy) {
@@ -1484,7 +1590,7 @@ async function updateConsole() {
 }
 
 async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
-  if (!cfg.allowFrom.includes(i.user.id)) {
+  if (!isOwner(i.user.id)) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
   }
@@ -1508,6 +1614,19 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
   const r = interactionReplier(i, true)
   if (i.isButton() && i.customId === 'console:migrate') {
     await runCommand(r, '', 'migrate')
+    return
+  }
+  if (i.isButton() && (i.customId === 'console:pauseall' || i.customId === 'console:resumeall')) {
+    await setAllPaused(i.customId === 'console:pauseall', i.user.username)
+    await r.reply(state.pausedAll ? m.allPaused : m.allResumed)
+    return
+  }
+  if (i.isStringSelectMenu() && i.customId === 'console:pause') {
+    const t = tracked.get(i.values[0])
+    if (!t) return void (await r.reply(m.sessionNotFound))
+    await setSessionPaused(t, !t.st.paused, i.user.username)
+    await r.reply(t.st.paused ? m.sessionPaused(t.st.channelId) : m.sessionResumed(t.st.channelId))
+    consoleRendered = ''
     return
   }
   if (i.isModalSubmit()) {
@@ -1540,6 +1659,164 @@ async function cleanupEnded() {
   }
 }
 
+// ---- sharing: per-session members and private channels ----------------------
+
+/** Set at startup: without Manage Roles, channels stay visible to everyone and /share is off. */
+let canManageRoles = false
+
+const OWNER_ALLOW = { ViewChannel: true, ReadMessageHistory: true, SendMessages: true }
+/** The bot must keep seeing and managing channels after @everyone is shut out. */
+const BOT_ALLOW = {
+  ViewChannel: true,
+  ReadMessageHistory: true,
+  SendMessages: true,
+  SendMessagesInThreads: true,
+  CreatePublicThreads: true,
+  ManageChannels: true,
+  ManageRoles: true,
+  ManageThreads: true,
+  AttachFiles: true,
+  AddReactions: true,
+  EmbedLinks: true,
+}
+function memberPerms(role: Role) {
+  const act = role !== 'viewer'
+  return { ViewChannel: true, ReadMessageHistory: true, SendMessages: act, SendMessagesInThreads: act, AddReactions: act, AttachFiles: act }
+}
+
+function sessionByChannel(channelId: string): SessionState | undefined {
+  return trackedByChannel(channelId)?.st ?? endedByChannel(channelId)?.[1]
+}
+
+/** Give a session channel its members' overwrites (after creating or recreating it). */
+async function applyMembers(ch: TextChannel, st: SessionState) {
+  if (!canManageRoles) return
+  for (const [id, role] of Object.entries(st.members ?? {})) {
+    await ch.permissionOverwrites.edit(id, memberPerms(role)).catch(e => log(`member overwrite for ${id} failed:`, e?.message))
+  }
+}
+
+/**
+ * Make our categories private: only the bot and the owners can see them, and
+ * channels in them follow. Channels created before this (or with members) are
+ * re-synced to the category and get their members' overwrites back.
+ */
+async function lockDown() {
+  canManageRoles = !!guild.members.me?.permissions.has(PermissionFlagsBits.ManageRoles)
+  if (!canManageRoles) {
+    log('bot lacks "Manage Roles": session channels stay visible to everyone and /share is disabled')
+    return
+  }
+  for (const id of [state.categoryId, state.archiveCategoryId]) {
+    const cat = id ? guild.channels.cache.get(id) : undefined
+    if (cat?.type !== ChannelType.GuildCategory) continue
+    try {
+      // Bot first, or denying @everyone could lock the bot out of its own category.
+      await cat.permissionOverwrites.edit(client.user!.id, BOT_ALLOW)
+      for (const owner of cfg.allowFrom) await cat.permissionOverwrites.edit(owner, OWNER_ALLOW)
+      await cat.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false })
+      for (const child of cat.children.cache.values()) {
+        if (child.permissionsLocked) continue
+        await child.lockPermissions()
+        const st = child.type === ChannelType.GuildText ? sessionByChannel(child.id) : undefined
+        if (st && child.type === ChannelType.GuildText) await applyMembers(child, st)
+      }
+    } catch (e: any) {
+      log(`making ${cat.name} private failed:`, e?.message ?? e)
+    }
+  }
+}
+
+const roleName = (r: Role) => (r === 'viewer' ? m.roleViewer : r === 'collab' ? m.roleCollab : m.roleFull)
+
+async function share(r: Replier, channelId: string, userId: string, role: Role | undefined) {
+  const st = sessionByChannel(channelId)
+  const ch = st && guild.channels.cache.get(st.channelId)
+  if (!st || ch?.type !== ChannelType.GuildText) return void (await r.reply(m.notSessionChannel))
+  if (!canManageRoles) return void (await r.reply(m.needManageRoles))
+  if (isOwner(userId)) return void (await r.reply(m.alreadyOwner))
+  if (role) {
+    await ch.permissionOverwrites.edit(userId, memberPerms(role))
+    st.members = { ...st.members, [userId]: role }
+    await r.reply(m.shared(userId, roleName(role)))
+  } else {
+    await ch.permissionOverwrites.delete(userId).catch(() => {})
+    if (st.members) delete st.members[userId]
+    await r.reply(m.unshared(userId))
+  }
+  stateDirty = true
+}
+
+function memberList(st: SessionState): string {
+  const lines = cfg.allowFrom.map(id => `👑 <@${id}> · ${m.roleOwner}`)
+  for (const [id, role] of Object.entries(st.members ?? {})) lines.push(`${role === 'viewer' ? '👀' : role === 'collab' ? '💬' : '🔑'} <@${id}> · ${roleName(role)}`)
+  return `${m.membersTitle}\n${lines.join('\n')}`
+}
+
+// ---- pausing --------------------------------------------------------------------
+
+async function setSessionPaused(t: Tracked, paused: boolean, by: string) {
+  if (!!t.st.paused === paused) return
+  t.st.paused = paused
+  stateDirty = true
+  if (state.pausedAll) return // still paused overall; nothing visibly changes
+  await announcePause(t, paused, by)
+}
+
+async function setAllPaused(paused: boolean, by: string) {
+  if (!!state.pausedAll === paused) return
+  state.pausedAll = paused
+  stateDirty = true
+  for (const t of tracked.values()) if (t.live && !t.st.paused) await announcePause(t, paused, by)
+}
+
+async function announcePause(t: Tracked, paused: boolean, by: string) {
+  if (paused) {
+    t.st.pausedSkipped = 0
+    await post(t, [m.syncPaused(by)])
+  } else {
+    const skipped = t.st.pausedSkipped ?? 0
+    t.st.pausedSkipped = 0
+    await post(t, [m.syncResumed(by, skipped)])
+  }
+}
+
+/** /sync on|off: in a session channel for that session, anywhere else for every session. */
+async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
+  const t = trackedByChannel(channelId)
+  if (t) {
+    await setSessionPaused(t, !on, by)
+    await r.reply(on ? m.sessionResumed(t.st.channelId) : m.sessionPaused(t.st.channelId))
+  } else {
+    await setAllPaused(!on, by)
+    await r.reply(on ? m.allResumed : m.allPaused)
+  }
+}
+
+// ---- /share, /unshare, /members, /sync -------------------------------------------
+
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync'] as const
+
+async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
+  const st = sessionByChannel(i.channelId)
+  const need: Need = i.commandName === 'members' ? 'view' : 'owner'
+  if (!can(i.user.id, st, need) && !(i.commandName === 'sync' && isOwner(i.user.id))) {
+    await i.reply({ content: m.notAuthorized, ephemeral: true })
+    return
+  }
+  if (i.commandName === 'members') {
+    if (!st) return void (await i.reply({ content: m.notSessionChannel, ephemeral: true }))
+    await i.reply({ content: memberList(st), ephemeral: true, allowedMentions: { parse: [] } })
+    return
+  }
+  await i.deferReply()
+  const r = interactionReplier(i)
+  if (i.commandName === 'sync') return setSync(r, i.channelId, i.options.getString('state') === 'on', i.user.username)
+  const user = i.options.getUser('user', true)
+  if (user.bot) return void (await r.reply(m.cantShareWithBot))
+  await share(r, i.channelId, user.id, i.commandName === 'share' ? (i.options.getString('role', true) as Role) : undefined)
+}
+
 // ---- channel-server connections -------------------------------------------
 
 function trackedByPid(pid: number): Tracked | undefined {
@@ -1554,6 +1831,17 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
   }
   if (msg.t === 'plan') {
     await startPlan(sock, msg.sessionId, msg.plan)
+    return
+  }
+  if (msg.t === 'pause') {
+    const t = msg.pid ? trackedByPid(msg.pid) : undefined
+    if (t) {
+      await setSessionPaused(t, msg.paused, m.pausedLocal)
+      ipcSend(sock, { t: 'pause_result', text: msg.paused ? m.localSessionPaused : m.localSessionResumed })
+    } else {
+      await setAllPaused(msg.paused, m.pausedLocal)
+      ipcSend(sock, { t: 'pause_result', text: msg.paused ? m.allPaused : m.allResumed })
+    }
     return
   }
   if (msg.t === 'type_result') {
@@ -1573,7 +1861,8 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
   }
   const t = self.pid ? trackedByPid(self.pid) : undefined
   if (msg.t === 'permission_request') {
-    if (!t) return
+    // Paused: the prompt is only answered in the terminal.
+    if (!t || isPaused(t.st)) return
     const ch = await channelOf(t)
     if (!ch) return
     let preview = msg.input_preview
@@ -1592,9 +1881,9 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
       new ButtonBuilder().setCustomId(`perm:allow:${self.pid}:${msg.request_id}`).setLabel(m.allow).setEmoji('✅').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`perm:deny:${self.pid}:${msg.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
     )
-    const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+    const who = audience(t.st, 'approve')
     await enqueue(ch.id, () =>
-      ch.send({ content: `${mentions}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: cfg.allowFrom } }),
+      ch.send({ content: `${mentionsOf(who)}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: who } }),
     )
     return
   }
@@ -1675,6 +1964,7 @@ client.once('clientReady', async c => {
   await guild.commands
     .set(SLASH_COMMANDS.map(c => c.toJSON()))
     .catch(e => log(`slash commands not registered (${e?.message}); re-invite the bot with the applications.commands scope`))
+  await lockDown()
   log(`syncing into ${guild.name} (${guild.id})`)
   startIpc()
   setInterval(() => void tick(), TICK_MS)

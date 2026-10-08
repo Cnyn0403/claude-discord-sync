@@ -117,9 +117,37 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/end` | session channel | Interrupt if busy, then `/exit` |
 | `/resume` | archive post or ended channel | `ccd --resume <id>` in tmux; a new channel is created |
 | `/migrate` | anywhere | Move sessions archived as text channels into the forum |
+| `/share @user <role>` | session channel | Give someone access to this session (see [Sharing](#sharing)) |
+| `/unshare @user` | session channel | Remove their access |
+| `/members` | session channel | List who can access this session |
+| `/sync off` / `/sync on` | session channel, or anywhere for every session | Pause / resume mirroring (see [Pausing](#pausing)) |
 | `yes abcde` / `no abcde` | session channel | Answer a permission prompt by its code |
 
-Each command also works as `!new`, `!stop`, and so on.
+Each command also works as `!new`, `!stop`, `!sync off`, and so on.
+
+## Sharing
+
+Session channels are private: only the bot and the owners in `allowFrom` can see them. To bring someone into one session, use `/share @user <role>` in its channel:
+
+| | Owner | Full | Collaborate | View |
+|---|---|---|---|---|
+| See the channel and conversation | ✅ | ✅ | ✅ | ✅ |
+| Talk to Claude, answer questions, `/stop` | ✅ | ✅ | ✅ | |
+| Approve permission prompts and plans | ✅ | ✅ | | |
+| `/end`, `/share`, `/new`, `/resume`, the console | ✅ | | | |
+
+Collaborators' messages reach Claude marked with their role. Anyone who can talk to Claude can make it act on your computer, so share with care. Access is kept across `/resume`; archived forum posts are visible to owners only.
+
+This needs the bot's **Manage Roles** permission. Without it the daemon logs a warning, channels stay visible to the whole server and `/share` is disabled.
+
+## Pausing
+
+Pause mirroring when you're about to work on something that shouldn't reach Discord:
+
+- **On the computer:** `claude-discord-sync pause` / `unpause`. Inside a Claude Code session (`! claude-discord-sync pause`) it pauses that session; elsewhere, or with `all`, every session.
+- **On Discord:** `/sync off` / `/sync on` in a session channel, anywhere else for every session, or the console's pause controls.
+
+While paused, nothing from the session is posted (not even its title in the console), questions, plans and permission prompts are answered in the terminal, and messages sent on Discord are not passed to Claude. On resume, the paused stretch is **not** posted afterwards; the channel just says how many messages were skipped.
 
 ## Configuration
 
@@ -147,7 +175,7 @@ Each command also works as `!new`, `!stop`, and so on.
 |---|---|
 | `language` | `"en"` (default) or `"zh-TW"`. Slash command descriptions follow each user's Discord language regardless |
 | `guildId` | Server to use. Auto-detected when the bot is in exactly one |
-| `allowFrom` | Discord user IDs allowed to talk to sessions, press buttons and run commands. Everyone else gets 🚫 |
+| `allowFrom` | Owners: Discord user IDs with full control of every session. Others only get what a session is [shared](#sharing) with them |
 | `categoryName` | Category for session channels |
 | `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
 | `archiveForumName` | Forum for ended sessions, default `claude-archive` (`claude-已結束` in zh-TW); `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
