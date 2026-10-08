@@ -29,7 +29,7 @@ dir="$HOME/.local/share/claude-discord-sync"
 bin="$HOME/.local/bin"
 mkdir -p "$dir" "$bin"
 
-echo "Downloading $asset…"
+echo "Downloading ${asset}..."
 curl -fL --progress-bar "$base/$asset" -o "$dir/claude-discord-sync.new"
 expected="$(curl -fsSL "$base/SHA256SUMS" | awk -v a="$asset" '$2 == a { print $1 }')"
 if command -v sha256sum >/dev/null 2>&1; then

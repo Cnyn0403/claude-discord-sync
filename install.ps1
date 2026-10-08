@@ -1,6 +1,6 @@
 # Install claude-discord-sync on Windows, then run its setup (PowerShell):
 #   irm https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.ps1 | iex
-# A specific release:  $env:CDS_VERSION = 'v0.2.0'; irm … | iex
+# A specific release:  $env:CDS_VERSION = 'v0.2.0'; irm ... | iex
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is very slow with the progress bar
 
