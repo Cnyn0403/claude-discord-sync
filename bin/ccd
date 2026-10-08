@@ -4,4 +4,9 @@
 DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 BUN="$(command -v bun)"
 MCP="{\"mcpServers\":{\"discord-sync\":{\"command\":\"$BUN\",\"args\":[\"$DIR/src/channel-server.ts\"]}}}"
-exec claude --mcp-config "$MCP" --dangerously-load-development-channels server:discord-sync "$@"
+# AskUserQuestion / ExitPlanMode are answered from Discord menus (falls back to the terminal on
+# timeout, DISCORD_SYNC_ASK_TIMEOUT seconds, default 600). stop-hook.sh is the
+# fallback for !stop when Esc can't be pressed.
+TIMEOUT=$(( ${DISCORD_SYNC_ASK_TIMEOUT:-600} + 30 ))
+SETTINGS="{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"AskUserQuestion|ExitPlanMode\",\"hooks\":[{\"type\":\"command\",\"command\":\"$BUN $DIR/src/ask-hook.ts\",\"timeout\":$TIMEOUT}]},{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"$DIR/bin/stop-hook.sh\"}]}]}}"
+exec claude --mcp-config "$MCP" --settings "$SETTINGS" --dangerously-load-development-channels server:discord-sync "$@"

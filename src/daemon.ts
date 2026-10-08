@@ -14,19 +14,31 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   PermissionFlagsBits,
   type Guild,
   type TextChannel,
   type Message,
   type Interaction,
+  type ButtonInteraction,
+  type StringSelectMenuInteraction,
+  type ModalSubmitInteraction,
+  type MessageActionRowComponentBuilder,
+  AttachmentBuilder,
 } from 'discord.js'
 import { createServer, type Socket } from 'net'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { homedir } from 'os'
 import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync } from 'fs'
-import { basename, join } from 'path'
+import { basename, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, JsonlTail, type LiveSession } from './sessions'
-import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext } from './render'
-import { send as ipcSend, onLines, type ClientMsg } from './ipc'
+import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
+import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 
 const cfg = loadConfig()
 const STATE_FILE = join(STATE_DIR, 'state.json')
@@ -73,6 +85,10 @@ type Tracked = {
   tail?: JsonlTail
   ctx: RenderContext
   lastTyping: number
+  /** When the current busy stretch started, for the "done" notification. */
+  busySince?: number
+  /** A stop-hook flag file is waiting for this session's next tool call. */
+  stopFlag?: boolean
 }
 const tracked = new Map<string, Tracked>()
 const creating = new Set<string>()
@@ -101,11 +117,16 @@ async function channelOf(t: Tracked): Promise<TextChannel | undefined> {
   return ch?.type === ChannelType.GuildText ? ch : undefined
 }
 
-async function post(t: Tracked, texts: string[]) {
+async function post(t: Tracked, posts: Post[]) {
   const ch = await channelOf(t)
   if (!ch) return
-  for (const text of texts) {
-    if (text.trim()) await enqueue(ch.id, () => ch.send({ content: text, allowedMentions: { parse: [] } }))
+  for (const p of posts) {
+    if (typeof p === 'string') {
+      if (p.trim()) await enqueue(ch.id, () => ch.send({ content: p, allowedMentions: { parse: [] } }))
+    } else {
+      const file = new AttachmentBuilder(Buffer.from(p.file, 'utf8'), { name: 'reply.md' })
+      await enqueue(ch.id, () => ch.send({ content: p.content, files: [file], allowedMentions: { parse: [] } }))
+    }
   }
 }
 
@@ -155,6 +176,7 @@ async function startTracking(s: LiveSession) {
     ctx: { toolNames: new Map(), showToolCalls: cfg.showToolCalls },
     lastTyping: 0,
   }
+  t.ctx.askOnDiscord = peers.has(s.pid)
   let ch = prev ? await channelOf(t) : undefined
   const transcript = findTranscript(s.sessionId, s.cwd)
 
@@ -185,7 +207,7 @@ async function startTracking(s: LiveSession) {
       }
       const shown = blocks.slice(-cfg.backlog)
       if (blocks.length > shown.length) await post(t, [`-# …（略過較早的 ${blocks.length - shown.length} 則）`])
-      await post(t, pack(shown))
+      await post(t, pack(shown, cfg.attachOver))
       t.st.offset = tail.offset
       if (t.st.title) await ch.setTopic(topicFor(s.sessionId, t.st)).catch(() => {})
     }
@@ -221,6 +243,8 @@ function pump(t: Tracked) {
   }
   const records = t.tail.read()
   if (!records.length) return
+  // ccd sessions post AskUserQuestion interactively via ask-hook.ts instead.
+  t.ctx.askOnDiscord = !!t.live && peers.has(t.live.pid)
   const blocks: Block[] = []
   let newTitle: string | undefined
   for (const o of records) {
@@ -230,12 +254,41 @@ function pump(t: Tracked) {
   }
   t.st.offset = t.tail.offset
   stateDirty = true
-  if (blocks.length) void post(t, pack(blocks))
+  if (blocks.length) void post(t, pack(blocks, cfg.attachOver))
   if (newTitle) {
     t.st.title = newTitle
     // Topic edits are rate limited (2 per 10 min per channel); titles change rarely.
     void channelOf(t).then(ch => ch?.setTopic(topicFor(t.sessionId, t.st)).catch(() => {}))
   }
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000)
+  return s >= 60 ? `${Math.floor(s / 60)} 分 ${s % 60} 秒` : `${s} 秒`
+}
+
+/** @-mention the user when Claude finishes a turn, so they know to come back. */
+function notifyWhenDone(t: Tracked) {
+  const status = t.live?.status
+  if (status === 'busy') {
+    t.busySince ??= Date.now()
+    return
+  }
+  if (status === 'idle' && t.stopFlag) clearStopFlag(t)
+  // Other non-idle states (e.g. waiting on a prompt) keep the stretch open.
+  if (status !== 'idle' || t.busySince === undefined) return
+  const elapsed = Date.now() - t.busySince
+  t.busySince = undefined
+  if (cfg.notifyMinBusySec < 0 || elapsed < cfg.notifyMinBusySec * 1000 || !cfg.allowFrom.length) return
+  // A pending question already pinged them.
+  if ([...asks.values(), ...plans.values()].some(a => a.channelId === t.st.channelId)) return
+  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  void channelOf(t).then(ch => {
+    if (!ch) return
+    void enqueue(ch.id, () =>
+      ch.send({ content: `${mentions} ✅ Claude 完成了（${formatDuration(elapsed)}）`, allowedMentions: { users: cfg.allowFrom } }),
+    )
+  })
 }
 
 let ticking = false
@@ -265,6 +318,7 @@ async function tick() {
         continue
       }
       pump(t)
+      notifyWhenDone(t)
       // Typing indicator while Claude is working (lasts ~10s per call).
       if (t.live?.status === 'busy' && Date.now() - t.lastTyping > 8000) {
         t.lastTyping = Date.now()
@@ -314,6 +368,11 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
+  if (/^!new(\s|$)/.test(msg.content)) {
+    if (!cfg.allowFrom.includes(msg.author.id)) void msg.react('🚫').catch(() => {})
+    else await startNewSession(msg).catch(e => void msg.reply(`⚠️ 啟動失敗：${e?.message ?? e}`).catch(() => {}))
+    return
+  }
   const t = trackedByChannel(msg.channelId)
   if (!t) return
   if (!cfg.allowFrom.includes(msg.author.id)) {
@@ -321,6 +380,10 @@ client.on('messageCreate', async (msg: Message) => {
     return
   }
   const peer = t.live ? peers.get(t.live.pid) : undefined
+  if (/^!stop\s*$/i.test(msg.content)) {
+    await stopSession(t, msg, peer).catch(e => void msg.reply(`⚠️ 停止失敗：${e?.message ?? e}`).catch(() => {}))
+    return
+  }
   if (!peer) {
     void msg
       .reply('⚠️ 這個 session 是唯讀的（沒有載入 discord-sync channel）。要從 Discord 對話，請用 `ccd` 啟動 Claude Code。')
@@ -349,6 +412,14 @@ client.on('messageCreate', async (msg: Message) => {
 })
 
 client.on('interactionCreate', async (i: Interaction) => {
+  if ((i.isButton() || i.isStringSelectMenu() || i.isModalSubmit()) && i.customId.startsWith('ask')) {
+    await handleAskInteraction(i).catch(e => log('ask interaction failed:', e?.message ?? e))
+    return
+  }
+  if ((i.isButton() || i.isModalSubmit()) && i.customId.startsWith('plan')) {
+    await handlePlanInteraction(i).catch(e => log('plan interaction failed:', e?.message ?? e))
+    return
+  }
   if (!i.isButton()) return
   const m = /^perm:(allow|deny):(\d+):([a-km-z]{5})$/.exec(i.customId)
   if (!m) return
@@ -367,6 +438,381 @@ client.on('interactionCreate', async (i: Interaction) => {
   await i.update({ content: `${i.message.content}\n\n**${label}**（${i.user.username}）`, components: [] }).catch(() => {})
 })
 
+// ---- AskUserQuestion on Discord --------------------------------------------
+
+type PendingAsk = {
+  sock: Socket
+  channelId: string
+  messageId?: string
+  questions: AskQuestion[]
+  answers: (string | undefined)[]
+  /** Options picked alongside "other" while its modal is open. */
+  picked: Map<number, string[]>
+}
+const asks = new Map<string, PendingAsk>()
+const OTHER = 'other'
+
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+
+function askContent(a: PendingAsk, footer?: string): string {
+  const n = a.questions.length
+  const parts = a.questions.map((q, i) => {
+    const opts = q.options.map((o, j) => `  **${j + 1}.** ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n')
+    const ans = a.answers[i]
+    return `**❓ ${n > 1 ? `(${i + 1}) ` : ''}${q.question}**${q.multiSelect ? '（可複選）' : ''}\n${opts}${ans !== undefined ? `\n↳ ✅ **${ans}**` : ''}`
+  })
+  return clip([...parts, footer].filter(Boolean).join('\n\n'), 2000)
+}
+
+function askComponents(key: string, a: PendingAsk) {
+  const rows = a.questions.map((q, i) => {
+    const options = q.options.slice(0, 24).map((o, j) => ({
+      label: clip(o.label, 100),
+      value: String(j),
+      ...(o.description ? { description: clip(o.description, 100) } : {}),
+    }))
+    options.push({ label: '其他（自己輸入）…', value: OTHER, description: '用文字回答' })
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`ask:${key}:${i}`)
+      .setPlaceholder(clip(`${a.questions.length > 1 ? `(${i + 1}) ` : ''}${q.header ? `[${q.header}] ` : ''}${q.question}`, 150))
+      .setMinValues(1)
+      .setMaxValues(q.multiSelect ? options.length : 1)
+      .addOptions(options)
+    return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(menu)
+  })
+  rows.push(
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`askterm:${key}`).setLabel('改在終端機回答').setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
+    ),
+  )
+  return rows.slice(0, 5)
+}
+
+async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[]) {
+  const t = tracked.get(sessionId)
+  const ch = t && (await channelOf(t))
+  // Discord allows 5 component rows: up to 4 questions + the terminal button.
+  if (!ch || !questions.length || questions.length > 4) {
+    ipcSend(sock, { t: 'ask_result' })
+    return
+  }
+  const key = Math.random().toString(36).slice(2, 10)
+  const a: PendingAsk = { sock, channelId: ch.id, questions, answers: questions.map(() => undefined), picked: new Map() }
+  asks.set(key, a)
+  sock.on('close', () => {
+    // Hook timed out or Claude Code moved on: retire the menus.
+    if (asks.get(key) !== a) return
+    asks.delete(key)
+    if (a.messageId)
+      void ch.messages.edit(a.messageId, { content: askContent(a, '-# ⏱️ 已逾時，改在終端機回答'), components: [] }).catch(() => {})
+  })
+  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  const sent = await enqueue(ch.id, () =>
+    ch.send({
+      content: clip(`${mentions}\n${askContent(a)}`, 2000),
+      components: askComponents(key, a),
+      allowedMentions: { users: cfg.allowFrom },
+    }),
+  )
+  a.messageId = sent.id
+}
+
+async function handleAskInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
+  const m = /^ask(term|other)?:(\w+)(?::(\d+))?$/.exec(i.customId)
+  if (!m) return
+  if (!cfg.allowFrom.includes(i.user.id)) {
+    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    return
+  }
+  const [, kind, key, qs] = m
+  const a = asks.get(key)
+  if (!a) {
+    await i.reply({ content: '這個問題已經結束了。', ephemeral: true })
+    return
+  }
+  const update = (opts: { content: string; components: any[] }) =>
+    i.isModalSubmit() ? (i.isFromMessage() ? i.update(opts) : i.reply(opts)) : i.update(opts)
+  const settle = (answers: Record<string, string> | undefined, footer: string) => {
+    asks.delete(key)
+    ipcSend(a.sock, { t: 'ask_result', answers })
+    return update({ content: askContent(a, footer), components: [] })
+  }
+
+  if (kind === 'term') {
+    await settle(undefined, `-# ⌨️ 改在終端機回答（${i.user.username}）`)
+    return
+  }
+  const qi = Number(qs)
+  const q = a.questions[qi]
+  if (!q) return
+  let answer: string
+  if (i.isStringSelectMenu()) {
+    const labels = i.values.filter(v => v !== OTHER).map(v => q.options[Number(v)]?.label ?? v)
+    if (i.values.includes(OTHER)) {
+      a.picked.set(qi, labels)
+      const input = new TextInputBuilder()
+        .setCustomId('text')
+        .setLabel(clip(q.header || '你的回答', 45))
+        .setPlaceholder(clip(q.question, 100))
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+      await i.showModal(
+        new ModalBuilder()
+          .setCustomId(`askother:${key}:${qi}`)
+          .setTitle('其他')
+          .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input)),
+      )
+      return
+    }
+    answer = labels.join(', ')
+  } else if (i.isModalSubmit()) {
+    answer = [...(a.picked.get(qi) ?? []), i.fields.getTextInputValue('text').trim()].join(', ')
+    a.picked.delete(qi)
+  } else {
+    return
+  }
+  a.answers[qi] = answer
+  if (a.answers.every(x => x !== undefined)) {
+    const answers = Object.fromEntries(a.questions.map((q, j) => [q.question, a.answers[j]!]))
+    await settle(answers, `-# ✅ 已由 ${i.user.username} 回答`)
+  } else {
+    await update({ content: askContent(a), components: askComponents(key, a) })
+  }
+}
+
+// ---- ExitPlanMode on Discord ----------------------------------------------
+
+type PendingPlan = { sock: Socket; channelId: string; messageId?: string; content: string }
+const plans = new Map<string, PendingPlan>()
+
+async function startPlan(sock: Socket, sessionId: string, plan: string) {
+  const t = tracked.get(sessionId)
+  const ch = t && (await channelOf(t))
+  if (!ch) {
+    ipcSend(sock, { t: 'ask_result' })
+    return
+  }
+  const key = Math.random().toString(36).slice(2, 10)
+  const mentions = cfg.allowFrom.map(id => `<@${id}>`).join(' ')
+  const full = `📋 **計畫待確認**\n${plan}`
+  // Long plans: preview in the message, full text attached.
+  const long = full.length > 1800
+  const p: PendingPlan = { sock, channelId: ch.id, content: long ? chunk(full, 1700)[0] + '\n-# 📎 完整計畫見附檔' : full }
+  plans.set(key, p)
+  sock.on('close', () => {
+    if (plans.get(key) !== p) return
+    plans.delete(key)
+    if (p.messageId) void ch.messages.edit(p.messageId, { content: `${p.content}\n\n-# ⏱️ 已逾時，改在終端機回答`, components: [] }).catch(() => {})
+  })
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`plan:approve:${key}`).setLabel('核准').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`plan:revise:${key}`).setLabel('繼續修改').setEmoji('✏️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`plan:term:${key}`).setLabel('改在終端機回答').setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
+  )
+  const sent = await enqueue(ch.id, () =>
+    ch.send({
+      content: `${mentions}\n${p.content}`.slice(0, 2000),
+      components: [row],
+      files: long ? [new AttachmentBuilder(Buffer.from(plan, 'utf8'), { name: 'plan.md' })] : [],
+      allowedMentions: { users: cfg.allowFrom },
+    }),
+  )
+  p.messageId = sent.id
+}
+
+async function handlePlanInteraction(i: ButtonInteraction | ModalSubmitInteraction) {
+  const m = /^plan(?::(approve|revise|term)|fb):(\w+)$/.exec(i.customId)
+  if (!m) return
+  if (!cfg.allowFrom.includes(i.user.id)) {
+    await i.reply({ content: 'Not authorized.', ephemeral: true })
+    return
+  }
+  const [, action, key] = m
+  const p = plans.get(key)
+  if (!p) {
+    await i.reply({ content: '這個計畫已經處理過了。', ephemeral: true })
+    return
+  }
+  if (action === 'revise') {
+    const input = new TextInputBuilder()
+      .setCustomId('text')
+      .setLabel('要修改的地方')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+    await (i as ButtonInteraction).showModal(
+      new ModalBuilder()
+        .setCustomId(`planfb:${key}`)
+        .setTitle('繼續修改計畫')
+        .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input)),
+    )
+    return
+  }
+  plans.delete(key)
+  let footer: string
+  if (action === 'approve') {
+    ipcSend(p.sock, { t: 'plan_result', approved: true })
+    footer = `**✅ 已核准**（${i.user.username}）`
+  } else if (action === 'term') {
+    ipcSend(p.sock, { t: 'ask_result' })
+    footer = `-# ⌨️ 改在終端機回答（${i.user.username}）`
+  } else {
+    const feedback = (i as ModalSubmitInteraction).fields.getTextInputValue('text').trim()
+    ipcSend(p.sock, { t: 'plan_result', approved: false, feedback })
+    footer = `**✏️ 要求修改**（${i.user.username}）\n${quoteLines(feedback)}`
+  }
+  const opts = { content: `${p.content}\n\n${footer}`.slice(0, 2000), components: [] }
+  if (i.isModalSubmit() && !i.isFromMessage()) await i.reply(opts)
+  else await (i as ButtonInteraction).update(opts)
+}
+
+const quoteLines = (s: string) => s.split('\n').map(l => '> ' + l).join('\n')
+
+// ---- !new: start a ccd session in tmux --------------------------------------
+
+const run = promisify(execFile)
+const CCD = resolve(import.meta.dir, '..', 'bin', 'ccd')
+const NEW_TIMEOUT_MS = 45_000
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+
+/** Startup dialogs a headless ccd would hang on; Enter picks the default (accept). */
+const STARTUP_PROMPTS = [/development channel/i, /trust (this folder|the files)/i]
+
+/** `!new <dir> [prompt]`: launch `ccd` in a detached tmux session; its channel appears once it registers. */
+async function startNewSession(msg: Message) {
+  const m = /^!new\s+(\S+)(?:\s+([\s\S]+))?$/.exec(msg.content.trim())
+  if (!m) {
+    await msg.reply('用法：`!new <資料夾> [第一句話]`，例如 `!new ~/proj 幫我看一下測試為什麼失敗`')
+    return
+  }
+  const dir = resolve(m[1].replace(/^~(?=\/|$)/, homedir()))
+  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+    await msg.reply(`⚠️ 找不到資料夾 \`${dir}\``)
+    return
+  }
+  const name = `ccd-${Math.random().toString(36).slice(2, 6)}`
+  const cmd = `exec ${shq(CCD)}${m[2] ? ' ' + shq(m[2].trim()) : ''}`
+  // `exec` makes the pane's process Claude Code itself, so pane_pid identifies the session.
+  const { stdout } = await run('tmux', ['new-session', '-d', '-P', '-F', '#{pane_pid}', '-s', name, '-x', '200', '-y', '50', '-c', dir, cmd])
+  const panePid = Number(stdout.trim())
+  const status = await msg.reply(`🚀 已在 tmux \`${name}\` 啟動，等待 session 註冊…\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
+
+  const answered = new Set<RegExp>()
+  const deadline = Date.now() + NEW_TIMEOUT_MS
+  let screen = ''
+  while (Date.now() < deadline) {
+    await Bun.sleep(1000)
+    const t = trackedByPid(panePid)
+    if (t?.st.channelId) {
+      await status.edit(`✅ 已啟動 \`${name}\` → <#${t.st.channelId}>\n-# 本機可以用 \`tmux attach -t ${name}\` 接手`)
+      return
+    }
+    try {
+      screen = (await run('tmux', ['capture-pane', '-p', '-t', name])).stdout
+    } catch {
+      await status.edit(`⚠️ tmux \`${name}\` 已經結束，Claude Code 可能啟動失敗。`)
+      return
+    }
+    const prompt = STARTUP_PROMPTS.find(re => re.test(screen) && !answered.has(re))
+    if (prompt) {
+      answered.add(prompt)
+      await run('tmux', ['send-keys', '-t', name, 'Enter'])
+    }
+  }
+  const tail = screen.split('\n').filter(l => l.trim()).slice(-20).join('\n')
+  await status.edit(
+    `⚠️ ${NEW_TIMEOUT_MS / 1000} 秒內沒看到 session 啟動，目前畫面：\n\`\`\`\n${tail.replace(/```/g, 'ˋˋˋ').slice(0, 1700)}\n\`\`\``,
+  )
+}
+
+// ---- !stop: interrupt the current turn ---------------------------------------
+
+const STOP_DIR = join(STATE_DIR, 'stop')
+const interruptWaiters = new Map<Socket, (r: { ok: boolean; error?: string }) => void>()
+
+function setStopFlag(t: Tracked) {
+  mkdirSync(STOP_DIR, { recursive: true })
+  writeFileSync(join(STOP_DIR, t.sessionId), '')
+  t.stopFlag = true
+}
+
+function clearStopFlag(t: Tracked) {
+  rmSync(join(STOP_DIR, t.sessionId), { force: true })
+  t.stopFlag = false
+}
+
+/** The tmux pane Claude Code runs in, from its environment. */
+function tmuxPaneOf(pid: number): { socket: string; pane: string } | undefined {
+  try {
+    const env = new Map(
+      readFileSync(`/proc/${pid}/environ`, 'utf8')
+        .split('\0')
+        .map(kv => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)] as const),
+    )
+    const socket = env.get('TMUX')?.split(',')[0]
+    const pane = env.get('TMUX_PANE')
+    return socket && pane ? { socket, pane } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function interruptViaPeer(peer: Socket): Promise<{ ok: boolean; error?: string }> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      interruptWaiters.delete(peer)
+      resolve({ ok: false, error: 'channel server did not answer' })
+    }, 3000)
+    interruptWaiters.set(peer, r => {
+      clearTimeout(timer)
+      interruptWaiters.delete(peer)
+      resolve(r)
+    })
+    ipcSend(peer, { t: 'interrupt' })
+  })
+}
+
+/**
+ * Press Esc in the session: via tmux when it runs in tmux, otherwise via the
+ * channel server's terminal. If that fails or doesn't take, leave a flag for
+ * stop-hook.sh to stop Claude before its next tool call.
+ */
+async function stopSession(t: Tracked, msg: Message, peer: Socket | undefined) {
+  if (t.live?.status !== 'busy') {
+    // Esc on an idle prompt is harmless once, but a double Esc opens the rewind menu.
+    await msg.reply('Claude 目前沒在工作。')
+    return
+  }
+  const pid = t.live.pid
+  const tmux = tmuxPaneOf(pid)
+  let error: string | undefined
+  if (tmux) {
+    await run('tmux', ['-S', tmux.socket, 'send-keys', '-t', tmux.pane, 'Escape']).catch(e => (error = e?.message ?? String(e)))
+  } else if (peer) {
+    error = (await interruptViaPeer(peer)).error
+  } else {
+    await msg.reply('⚠️ 這個 session 沒有在 tmux 裡，也沒有載入 discord-sync channel，沒辦法從這裡停止。')
+    return
+  }
+  if (error) {
+    if (!peer) {
+      await msg.reply(`⚠️ 送不出 Esc：${error}`)
+      return
+    }
+    setStopFlag(t)
+    await msg.reply(`⚠️ 送不出 Esc（${error}），改成在 Claude 下一次使用工具前停止。`)
+    return
+  }
+  void msg.react('⏹️').catch(() => {})
+  const reply = await msg.reply(`⏹️ 已送出 Esc（${tmux ? 'tmux' : '終端機'}），確認中…`)
+  await Bun.sleep(4000)
+  if (t.live?.pid === pid && t.live.status === 'busy' && peer) {
+    setStopFlag(t)
+    await reply.edit('⏹️ 已送出 Esc，但 Claude 看起來還在工作，會在它下一次使用工具前停止。')
+  } else {
+    await reply.edit('⏹️ 已中斷。')
+  }
+}
+
 // ---- channel-server connections -------------------------------------------
 
 function trackedByPid(pid: number): Tracked | undefined {
@@ -375,6 +821,18 @@ function trackedByPid(pid: number): Tracked | undefined {
 }
 
 async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) {
+  if (msg.t === 'ask') {
+    await startAsk(sock, msg.sessionId, msg.questions)
+    return
+  }
+  if (msg.t === 'plan') {
+    await startPlan(sock, msg.sessionId, msg.plan)
+    return
+  }
+  if (msg.t === 'interrupt_result') {
+    interruptWaiters.get(sock)?.(msg)
+    return
+  }
   if (msg.t === 'hello') {
     self.pid = msg.claudePid
     peers.get(msg.claudePid)?.destroy()

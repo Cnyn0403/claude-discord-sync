@@ -27,6 +27,10 @@ export type Config = {
   backlog: number
   /** Show one-line summaries of tool calls. */
   showToolCalls: boolean
+  /** @-mention allowFrom when Claude goes idle after working at least this many seconds. -1 = never. */
+  notifyMinBusySec: number
+  /** Replies longer than this many characters are posted as a preview plus a .md attachment. */
+  attachOver: number
 }
 
 function readEnvFile(path: string): Record<string, string> {
@@ -68,5 +72,7 @@ export function loadConfig(): Config {
     kinds: file.kinds ?? ['interactive'],
     backlog: file.backlog ?? 15,
     showToolCalls: file.showToolCalls ?? true,
+    notifyMinBusySec: file.notifyMinBusySec ?? 15,
+    attachOver: file.attachOver ?? 3800,
   }
 }

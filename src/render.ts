@@ -10,6 +10,8 @@ export type RenderContext = {
   /** tool_use_id -> tool name, so tool_result records can be attributed. */
   toolNames: Map<string, string>
   showToolCalls: boolean
+  /** AskUserQuestion is posted interactively by the daemon, so don't render it as text. */
+  askOnDiscord?: boolean
 }
 
 const MAX = 1900
@@ -51,9 +53,10 @@ function renderUserText(raw: string): Block | undefined {
   return { kind: 'user', text: `👤 **本地輸入**\n${quote(text)}` }
 }
 
-function summarizeTool(name: string, input: any): Block | undefined {
+function summarizeTool(name: string, input: any, ctx: RenderContext): Block | undefined {
   input ??= {}
   if (name === 'AskUserQuestion' && Array.isArray(input.questions)) {
+    if (ctx.askOnDiscord) return undefined
     const parts = input.questions.map((q: any, i: number) => {
       const opts = (q.options ?? [])
         .map((o: any, j: number) => `  **${j + 1}.** ${o.label}${o.description ? ` — ${o.description}` : ''}`)
@@ -63,6 +66,7 @@ function summarizeTool(name: string, input: any): Block | undefined {
     return { kind: 'question', text: parts.join('\n\n') }
   }
   if (name === 'ExitPlanMode' && typeof input.plan === 'string') {
+    if (ctx.askOnDiscord) return undefined
     return { kind: 'question', text: `📋 **計畫待確認**\n${input.plan}` }
   }
   // Our own tools post their own output.
@@ -142,7 +146,7 @@ export function renderRecord(o: any, ctx: RenderContext): Block[] {
         out.push({ kind: 'assistant', text: item.text.trim() })
       } else if (item?.type === 'tool_use') {
         ctx.toolNames.set(item.id, item.name)
-        const b = summarizeTool(item.name, item.input)
+        const b = summarizeTool(item.name, item.input, ctx)
         if (b && (b.kind !== 'tool' || ctx.showToolCalls)) out.push(b)
       }
     }
@@ -186,9 +190,15 @@ export function chunk(text: string, max = MAX): string[] {
   return out
 }
 
-/** Pack blocks into as few messages as possible; user/assistant/question blocks start a new message. */
-export function pack(blocks: Block[]): string[] {
-  const out: string[] = []
+/** A Discord message: plain text, or a preview with the full text attached as a file. */
+export type Post = string | { content: string; file: string }
+
+/**
+ * Pack blocks into as few messages as possible; user/assistant/question blocks start a new message.
+ * Standalone blocks longer than `attachOver` become a preview plus an attachment.
+ */
+export function pack(blocks: Block[], attachOver = Infinity): Post[] {
+  const out: Post[] = []
   let cur = ''
   for (const b of blocks) {
     const standalone = b.kind !== 'tool' && b.kind !== 'info'
@@ -196,7 +206,9 @@ export function pack(blocks: Block[]): string[] {
       if (cur) out.push(cur)
       cur = ''
     }
-    if (standalone) {
+    if (standalone && b.text.length > attachOver) {
+      out.push({ content: chunk(b.text, MAX - 40)[0] + '\n-# 📎 全文見附檔', file: b.text })
+    } else if (standalone) {
       out.push(...chunk(b.text))
     } else {
       cur = cur ? cur + '\n' + b.text : b.text
