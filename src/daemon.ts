@@ -1450,6 +1450,18 @@ const choice = (value: string, key: keyof typeof SLASH_DESCRIPTIONS) => ({
   value,
 })
 
+/** Permission modes for /mode, in Claude Code's Shift+Tab order. Defined before SLASH_COMMANDS, which uses them at load time. */
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
+type Mode = (typeof MODES)[number]
+const isMode = (s: string): s is Mode => (MODES as readonly string[]).includes(s)
+const MODE_LABELS: Record<Mode, string> = {
+  default: 'default',
+  acceptEdits: 'accept edits',
+  plan: 'plan',
+  auto: 'auto',
+  bypassPermissions: 'bypass permissions',
+}
+
 const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('new'), 'new')
     .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
@@ -1968,17 +1980,6 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
 }
 
 // ---- /mode ---------------------------------------------------------------------
-
-const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
-type Mode = (typeof MODES)[number]
-const isMode = (s: string): s is Mode => (MODES as readonly string[]).includes(s)
-const MODE_LABELS: Record<Mode, string> = {
-  default: 'default',
-  acceptEdits: 'accept edits',
-  plan: 'plan',
-  auto: 'auto',
-  bypassPermissions: 'bypass permissions',
-}
 
 /**
  * The mode shown in Claude Code's footer ("⏵⏵ auto mode on (shift+tab to cycle)").
