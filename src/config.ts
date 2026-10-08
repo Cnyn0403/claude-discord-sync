@@ -22,6 +22,11 @@ export type Config = {
   guildId?: string
   /** Discord user IDs allowed to talk to sessions and answer permission prompts. */
   allowFrom: string[]
+  /**
+   * Experimental: this computer's name when several computers share one bot and
+   * server. Each gets its own category and console, and /new asks which computer.
+   */
+  machine?: string
   categoryName: string
   /**
    * Ended sessions become a post in this forum channel (summary, full conversation
@@ -101,6 +106,7 @@ export function loadConfig(): Config {
     language,
     guildId: file.guildId,
     allowFrom: file.allowFrom ?? officialAccess?.allowFrom ?? [],
+    machine: file.machine?.trim() || undefined,
     categoryName: file.categoryName ?? 'Claude Sessions',
     archiveForumName: file.archiveForumName ?? m.archiveForumName,
     archiveCategoryName: file.archiveCategoryName ?? 'Claude Sessions (ended)',

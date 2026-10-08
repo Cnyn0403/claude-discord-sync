@@ -52,6 +52,10 @@ import { daemonRunning } from './autostart'
 import { keysToTmux, type Key } from './keys'
 
 const cfg = loadConfig()
+/** Experimental: several computers share this bot and guild; this one's name. */
+const MACHINE = cfg.machine
+const CATEGORY_NAME = MACHINE ? `${cfg.categoryName} · ${MACHINE}` : cfg.categoryName
+const CONSOLE_NAME = MACHINE && cfg.consoleChannelName ? `${cfg.consoleChannelName}-${MACHINE}` : cfg.consoleChannelName
 const STATE_FILE = join(STATE_DIR, 'state.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const TICK_MS = 1500
@@ -100,6 +104,9 @@ type State = {
   archiveForumId?: string
   consoleChannelId?: string
   consoleMessageId?: string
+  /** Multi-machine mode: the shared devices channel and this computer's entry in it. */
+  devicesChannelId?: string
+  deviceMessageId?: string
   sessions: Record<string, SessionState>
 }
 
@@ -508,7 +515,7 @@ async function onChannelGone(id: string) {
     }
   }
   if (id === state.categoryId) {
-    state.categoryId = await ensureCategory(cfg.categoryName, undefined)
+    state.categoryId = await ensureCategory(CATEGORY_NAME, undefined)
     stateDirty = true
   }
 }
@@ -742,6 +749,11 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
+  if (MACHINE && !ownsChannel(msg.channelId, parentOf(msg.channelId))) {
+    // A ! command outside every computer's channels: one of them says where to use it.
+    if (/^!(new|stop|end|resume|migrate|sync|model|mode)\b/i.test(msg.content.trim()) && isNeutral(msg.channelId) && isLeader()) void msg.reply(m.whichDevice(onlineNames())).catch(() => {})
+    return
+  }
   const cmd = /^!(new|stop|end|resume|migrate|sync|model|mode)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
@@ -838,6 +850,7 @@ client.on('messageCreate', async (msg: Message) => {
 })
 
 client.on('interactionCreate', async (i: Interaction) => {
+  if (MACHINE && !(await routeHere(i))) return
   if (i.isAutocomplete() && i.commandName === 'new') {
     await i.respond(dirSuggestions(String(i.options.getFocused()))).catch(() => {})
     return
@@ -1546,8 +1559,15 @@ const MODE_LABELS: Record<Mode, string> = {
   bypassPermissions: 'bypass permissions',
 }
 
+/** /new; with several computers its first option picks which one. */
+function newCommand() {
+  const b = described(new SlashCommandBuilder().setName('new'), 'new')
+  if (MACHINE) b.addStringOption(o => described(o.setName('device'), 'device').setRequired(true).setAutocomplete(true))
+  return b
+}
+
 const SLASH_COMMANDS = [
-  described(new SlashCommandBuilder().setName('new'), 'new')
+  newCommand()
     .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
     .addStringOption(o => described(o.setName('prompt'), 'prompt')),
   described(new SlashCommandBuilder().setName('stop'), 'stop'),
@@ -1697,11 +1717,15 @@ function consoleView() {
 }
 
 async function consoleChannel(): Promise<TextChannel | undefined> {
-  if (!cfg.consoleChannelName) return undefined
+  if (!CONSOLE_NAME) return undefined
   const cached = state.consoleChannelId ? guild.channels.cache.get(state.consoleChannelId) : undefined
-  if (cached?.type === ChannelType.GuildText) return cached
+  if (cached?.type === ChannelType.GuildText) {
+    // Multi-machine mode switched on: give the console this computer's name.
+    if (MACHINE && cached.name !== discordName(CONSOLE_NAME)) await cached.setName(CONSOLE_NAME).catch(() => {})
+    return cached
+  }
   const ch = await guild.channels.create({
-    name: cfg.consoleChannelName,
+    name: CONSOLE_NAME,
     type: ChannelType.GuildText,
     parent: state.categoryId,
     position: 0,
@@ -2167,6 +2191,179 @@ function commandOutputSince(file: string, offset: number): string | undefined {
   return undefined
 }
 
+// ---- several computers, one bot (experimental) --------------------------------
+//
+// Every computer's daemon receives every message and interaction. Each one keeps
+// an entry (one message) in a shared devices channel, refreshed every minute, so
+// all of them know who is online. Then, without talking to each other:
+// - a computer handles what happens in its own channels;
+// - /new goes to the computer it names;
+// - the first online computer by name (the "leader") answers what belongs to
+//   nobody: the device list, an offline target, commands used elsewhere.
+
+const DEVICES_CHANNEL = 'claude-devices'
+const BEAT_MS = 60_000
+const DEVICES_REFRESH_MS = 20_000
+const OFFLINE_AFTER_MS = 150_000
+const DEVICE_TAG_RE = /cds-device name=(\S+) category=(\d*) console=(\d*)/
+
+type Device = { name: string; seen: number; offline: boolean; categoryId?: string; consoleId?: string; mine: boolean }
+let devices: Device[] = []
+let lastBeat = 0
+let warnedDuplicate = false
+
+/** Discord's form of a text channel name. */
+const discordName = (name: string) => name.toLowerCase().replace(/\s+/g, '-')
+
+const parentOf = (channelId: string): string | undefined => (guild.channels.cache.get(channelId) as { parentId?: string | null } | undefined)?.parentId ?? undefined
+
+/** The oldest channel by that name, so two computers that created one at once still meet in the same one. */
+async function devicesChannel(): Promise<TextChannel> {
+  const found = guild.channels.cache
+    .filter((c): c is TextChannel => c.type === ChannelType.GuildText && c.name === DEVICES_CHANNEL)
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+    .first()
+  const ch =
+    found ??
+    (await guild.channels.create({
+      name: DEVICES_CHANNEL,
+      type: ChannelType.GuildText,
+      topic: m.devicesTopic,
+      permissionOverwrites: canManageRoles
+        ? [
+            { id: client.user!.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            ...cfg.allowFrom.map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] })),
+            { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+          ]
+        : undefined,
+    }))
+  if (state.devicesChannelId !== ch.id) {
+    state.devicesChannelId = ch.id
+    state.deviceMessageId = undefined
+    stateDirty = true
+  }
+  return ch
+}
+
+/** Write this computer's entry: name, last seen, and its category and console so others can tell its channels apart. */
+async function heartbeat(offline = false) {
+  const ch = await devicesChannel()
+  const content =
+    `${offline ? '🔴' : '🟢'} **${MACHINE}** · <t:${Math.floor(Date.now() / 1000)}:R>\n` +
+    `-# cds-device name=${encodeURIComponent(MACHINE!)} category=${state.categoryId ?? ''} console=${state.consoleChannelId ?? ''}`
+  lastBeat = Date.now()
+  if (state.deviceMessageId) {
+    const edited = await ch.messages.edit(state.deviceMessageId, { content }).then(
+      () => true,
+      () => false,
+    )
+    if (edited) return
+  }
+  const sent = await ch.send({ content, flags: MessageFlags.SuppressNotifications, allowedMentions: { parse: [] } })
+  state.deviceMessageId = sent.id
+  stateDirty = true
+}
+
+/** Re-read every computer's entry. "Last seen" is Discord's edit time, so clocks don't need to agree. */
+async function refreshDevices() {
+  const ch = await devicesChannel()
+  const byName = new Map<string, Device>()
+  for (const msg of (await ch.messages.fetch({ limit: 50 })).values()) {
+    if (msg.author.id !== client.user!.id) continue
+    const match = DEVICE_TAG_RE.exec(msg.content)
+    if (!match) continue
+    const mine = msg.id === state.deviceMessageId
+    const d: Device = {
+      name: decodeURIComponent(match[1]),
+      seen: mine ? Date.now() : (msg.editedTimestamp ?? msg.createdTimestamp),
+      offline: !mine && msg.content.startsWith('🔴'),
+      categoryId: match[2] || undefined,
+      consoleId: match[3] || undefined,
+      mine,
+    }
+    if (d.name === MACHINE && !mine && isOnline(d) && !warnedDuplicate) {
+      warnedDuplicate = true
+      log(`another computer is also called "${MACHINE}"; give each one its own "machine" name`)
+    }
+    const prev = byName.get(d.name)
+    if (!prev || d.mine || (!prev.mine && d.seen > prev.seen)) byName.set(d.name, d)
+  }
+  devices = [...byName.values()]
+}
+
+async function machineTick() {
+  if (Date.now() - lastBeat >= BEAT_MS) await heartbeat()
+  await refreshDevices()
+}
+
+const isOnline = (d: Device) => d.mine || (!d.offline && Date.now() - d.seen < OFFLINE_AFTER_MS)
+function onlineDevices(): Device[] {
+  const list = devices.filter(isOnline)
+  if (!list.some(d => d.mine)) list.push({ name: MACHINE!, seen: Date.now(), offline: false, mine: true })
+  return list.sort((a, b) => a.name.localeCompare(b.name))
+}
+const onlineNames = () => onlineDevices().map(d => d.name)
+const isLeader = () => onlineDevices()[0]?.name === MACHINE
+
+/** This computer's channel: one of its sessions (live or archived), its console, or anything in its category. */
+function ownsChannel(channelId: string, parentId: string | undefined): boolean {
+  if (!MACHINE) return true
+  return !!sessionByChannel(channelId) || channelId === state.consoleChannelId || (!!parentId && parentId === state.categoryId)
+}
+
+/** Which computer a channel belongs to, as far as the devices channel tells. */
+function channelOwner(channelId: string): string | undefined {
+  const parentId = parentOf(channelId)
+  if (ownsChannel(channelId, parentId)) return MACHINE
+  return devices.find(d => !d.mine && (d.consoleId === channelId || (!!parentId && d.categoryId === parentId)))?.name
+}
+
+/**
+ * Belongs to no computer for sure. Threads and the shared archive are excluded:
+ * an archived session's post belongs to whichever computer ran it, and only
+ * that one knows.
+ */
+function isNeutral(channelId: string): boolean {
+  const ch = guild.channels.cache.get(channelId)
+  if (!ch || ch.isThread() || channelOwner(channelId)) return false
+  const parentId = parentOf(channelId)
+  return channelId !== state.archiveForumId && (!parentId || parentId !== state.archiveCategoryId)
+}
+
+function deviceChoices(typed: string, here: string | undefined): { name: string; value: string }[] {
+  const online = new Set(onlineNames())
+  return devices
+    .map(d => d.name)
+    .concat(online.has(MACHINE!) ? [] : [MACHINE!])
+    .filter((n, i, all) => all.indexOf(n) === i && n.toLowerCase().includes(typed.toLowerCase()))
+    // The computer whose channel this is first, then online ones.
+    .sort((a, b) => Number(b === here) - Number(a === here) || Number(online.has(b)) - Number(online.has(a)) || a.localeCompare(b))
+    .slice(0, 25)
+    .map(n => ({ name: clip(online.has(n) ? `🟢 ${n}` : m.deviceOfflineChoice(n), 100), value: n }))
+}
+
+/** Whether this computer should handle `i`. Answers for the leader what belongs to nobody. */
+async function routeHere(i: Interaction): Promise<boolean> {
+  const channelId = i.channelId ?? ''
+  if ((i.isAutocomplete() || i.isChatInputCommand()) && i.commandName === 'new') {
+    if (i.isAutocomplete() && i.options.getFocused(true).name === 'device') {
+      if (isLeader()) await i.respond(deviceChoices(String(i.options.getFocused()), channelOwner(channelId))).catch(() => {})
+      return false
+    }
+    const device = (i.isAutocomplete() ? String(i.options.get('device')?.value ?? '') : (i.options.getString('device') ?? '')).trim()
+    const target = device || channelOwner(channelId)
+    if (target === MACHINE) return true
+    if (!isLeader() || (target && onlineNames().includes(target))) return false
+    const text = target ? m.deviceOffline(target, onlineNames()) : m.pickDevice
+    if (i.isAutocomplete()) await i.respond([{ name: clip(text, 100), value: '-' }]).catch(() => {})
+    else await i.reply({ content: text, ephemeral: true }).catch(() => {})
+    return false
+  }
+  if (ownsChannel(channelId, parentOf(channelId))) return true
+  if (i.isRepliable() && isNeutral(channelId) && isLeader()) await i.reply({ content: m.whichDevice(onlineNames()), ephemeral: true }).catch(() => {})
+  return false
+}
+
 // ---- channel-server connections -------------------------------------------
 
 function trackedByPid(pid: number): Tracked | undefined {
@@ -2294,7 +2491,15 @@ client.once('clientReady', async c => {
     state.categoryId = state.archiveCategoryId = undefined
     state.sessions = {}
   }
-  state.categoryId = await ensureCategory(cfg.categoryName, state.categoryId)
+  if (MACHINE && state.categoryId && guild.channels.cache.get(state.categoryId)?.name !== CATEGORY_NAME) {
+    // Multi-machine mode switched on: move this computer's channels to its own category.
+    state.categoryId = await ensureCategory(CATEGORY_NAME, undefined)
+    for (const id of [state.consoleChannelId, ...Object.values(state.sessions).filter(st => !st.ended).map(st => st.channelId)]) {
+      const ch = id ? guild.channels.cache.get(id) : undefined
+      if (ch?.type === ChannelType.GuildText) await ch.setParent(state.categoryId, { lockPermissions: false }).catch(() => {})
+    }
+  }
+  state.categoryId = await ensureCategory(CATEGORY_NAME, state.categoryId)
   // In forum mode the archive category is only created if archiving falls back to it.
   state.archiveCategoryId =
     cfg.archiveCategoryName && !cfg.archiveForumName ? await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId) : state.archiveCategoryId
@@ -2315,6 +2520,11 @@ client.once('clientReady', async c => {
     .set(SLASH_COMMANDS.map(c => c.toJSON()))
     .catch(e => log(`slash commands not registered (${e?.message}); re-invite the bot with the applications.commands scope`))
   await lockDown()
+  if (MACHINE) {
+    await machineTick().catch(e => log('devices update failed:', e?.message ?? e))
+    setInterval(() => void machineTick().catch(e => log('devices update failed:', e?.message ?? e)), DEVICES_REFRESH_MS)
+    log(`multi-machine mode: this is "${MACHINE}"`)
+  }
   log(`syncing into ${guild.name} (${guild.id})`)
   startIpc()
   setInterval(() => void tick(), TICK_MS)
@@ -2323,7 +2533,9 @@ client.once('clientReady', async c => {
 
 client.on('error', e => log('client error:', e.message))
 
-function shutdown() {
+async function shutdown() {
+  // Tell the other computers right away instead of letting the entry go stale.
+  if (MACHINE && guild) await Promise.race([heartbeat(true).catch(() => {}), Bun.sleep(2000)])
   saveState()
   if (!IS_WIN) rmSync(SOCKET_PATH, { force: true })
   process.exit(0)

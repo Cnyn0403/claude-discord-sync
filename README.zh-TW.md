@@ -160,6 +160,22 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
 
 暫停期間，這個 session 的內容都不會貼到 Discord（連控制台上的標題都不會更新），選擇題、計畫和權限請求都在終端機回答，從 Discord 傳的訊息也不會送給 Claude。恢復時**不會**補貼暫停期間的內容，只會顯示有幾則訊息沒有同步。
 
+## 多台電腦共用一個 bot（實驗性）
+
+預設是一台電腦用一個 bot。若要讓多台電腦共用同一個 bot 和伺服器，請在每台電腦的 `config.json` 設定名稱：
+
+```json
+{ "machine": "home-server" }
+```
+
+共用 bot 的**每一台**電腦都要設定，而且名稱不能重複，設定後重啟各台的 daemon。之後每台電腦會：
+
+- 有自己的分類（`Claude Sessions · home-server`）和控制台（`claude-控制台-home-server`），原本的頻道會移過去；
+- 在共用的 `#claude-devices` 頻道保留一則訊息，每分鐘更新一次，讓各台電腦知道誰在線；
+- 只處理自己頻道裡的事。`/new` 的第一個選項是電腦（自動補全會列出來），只有被選到的那台會執行。
+
+每台電腦都會收到所有指令。它們不需要互相溝通，就能算出同一個「值班」電腦，也就是在線電腦中名稱排序最前面的那台。值班電腦負責回應不屬於任何一台的請求：電腦清單、目標電腦離線，以及在任何電腦頻道以外使用的指令。電腦剛啟動或關閉的幾秒內，自動補全可能沒有反應，再試一次即可。
+
 ## 設定
 
 `~/.claude/channels/discord-sync/config.json`（除了 `allowFrom` 都是選填）：
@@ -188,6 +204,7 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
 | `language` | `"en"`（預設）或 `"zh-TW"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
 | `guildId` | 要用的伺服器。bot 只在一個伺服器時會自動偵測 |
 | `allowFrom` | 擁有者：對所有 session 有完整權限的 Discord user ID。其他人只能使用 session [分享](#分享)給他們的權限 |
+| `machine` | 實驗性：多台電腦共用一個 bot 時這台電腦的名稱，見[多台電腦](#多台電腦共用一個-bot實驗性) |
 | `categoryName` | session 頻道所在的分類 |
 | `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立。預設是 `claude-控制台`（英文介面是 `claude-console`） |
 | `archiveForumName` | 封存用的論壇，預設是 `claude-已結束`（英文介面是 `claude-archive`）；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |

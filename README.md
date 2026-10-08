@@ -160,6 +160,22 @@ Pause mirroring when you're about to work on something that shouldn't reach Disc
 
 While paused, nothing from the session is posted (not even its title in the console), questions, plans and permission prompts are answered in the terminal, and messages sent on Discord are not passed to Claude. On resume, the paused stretch is **not** posted afterwards; the channel just says how many messages were skipped.
 
+## Several computers, one bot (experimental)
+
+By default, use one bot per computer. To share one bot and server between computers, give each computer a name in its `config.json`:
+
+```json
+{ "machine": "home-server" }
+```
+
+Set it on **every** computer that shares the bot, with a different name on each, then restart their daemons. Each computer then:
+
+- gets its own category (`Claude Sessions · home-server`) and console (`claude-console-home-server`); its existing channels move there;
+- keeps an entry in a shared `#claude-devices` channel, updated every minute, so the computers know who is online;
+- handles only what happens in its own channels. `/new` takes a computer first (autocomplete lists them) and runs only there.
+
+Every computer receives every command. Without talking to each other, they agree on a "leader", the first online computer by name, which answers what belongs to nobody: the computer list, a computer that is offline, and commands used outside any computer's channels. For a few seconds after a computer starts or stops, an autocomplete may come back empty; try again.
+
 ## Configuration
 
 `~/.claude/channels/discord-sync/config.json` (all optional except `allowFrom`):
@@ -188,6 +204,7 @@ While paused, nothing from the session is posted (not even its title in the cons
 | `language` | `"en"` (default) or `"zh-TW"`. Slash command descriptions follow each user's Discord language regardless |
 | `guildId` | Server to use. Auto-detected when the bot is in exactly one |
 | `allowFrom` | Owners: Discord user IDs with full control of every session. Others only get what a session is [shared](#sharing) with them |
+| `machine` | Experimental: this computer's name when several computers share one bot, see [Several computers](#several-computers-one-bot-experimental) |
 | `categoryName` | Category for session channels |
 | `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
 | `archiveForumName` | Forum for ended sessions, default `claude-archive` (`claude-已結束` in zh-TW); `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
