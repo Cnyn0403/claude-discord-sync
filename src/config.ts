@@ -51,7 +51,11 @@ export type Config = {
   /** Channel listing every session with stop/end/resume menus. Empty string = no console. */
   consoleChannelName: string
   /** Delete channels of sessions that ended this many days ago. 0 = keep forever. */
-  deleteEndedAfterDays: number
+  /**
+   * Delete archived sessions this many days after they ended; 0 = keep forever.
+   * Unset: forum posts are kept, archived text channels go after 7 days.
+   */
+  deleteEndedAfterDays?: number
 }
 
 function readEnvFile(path: string): Record<string, string> {
@@ -117,6 +121,6 @@ export function loadConfig(): Config {
     liveStatus: file.liveStatus ?? true,
     attachOver: file.attachOver ?? 3800,
     consoleChannelName: file.consoleChannelName ?? m.consoleChannelName,
-    deleteEndedAfterDays: file.deleteEndedAfterDays ?? 7,
+    deleteEndedAfterDays: file.deleteEndedAfterDays,
   }
 }

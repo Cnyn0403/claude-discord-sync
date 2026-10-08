@@ -56,6 +56,7 @@ const cfg = loadConfig()
 const MACHINE = cfg.machine
 const CATEGORY_NAME = MACHINE ? `${cfg.categoryName} · ${MACHINE}` : cfg.categoryName
 const CONSOLE_NAME = MACHINE && cfg.consoleChannelName ? `${cfg.consoleChannelName}-${MACHINE}` : cfg.consoleChannelName
+const FORUM_NAME = MACHINE && cfg.archiveForumName ? `${cfg.archiveForumName}-${MACHINE}` : cfg.archiveForumName
 const STATE_FILE = join(STATE_DIR, 'state.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const TICK_MS = 1500
@@ -346,17 +347,21 @@ async function archiveToCategory(t: Tracked) {
 
 /** When this guild last refused to create the forum; we retry after an hour (e.g. once Community is enabled). */
 let forumFailedAt = 0
-const forumAvailable = () => !!cfg.archiveForumName && Date.now() - forumFailedAt > 3_600_000
+const forumAvailable = () => !!FORUM_NAME && Date.now() - forumFailedAt > 3_600_000
+
+/** With several computers, each has its own forum in its own category; one shared by all is someone else's or left over. */
+const isOwnForum = (c: { name: string; parentId: string | null }) =>
+  c.name === discordName(FORUM_NAME) && (!MACHINE || c.parentId === state.categoryId)
 
 async function archiveForum(): Promise<ForumChannel> {
   const cached = state.archiveForumId ? guild.channels.cache.get(state.archiveForumId) : undefined
-  if (cached?.type === ChannelType.GuildForum) return cached
-  const found = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && c.name === cfg.archiveForumName) as ForumChannel | undefined
+  if (cached?.type === ChannelType.GuildForum && isOwnForum(cached)) return cached
+  const found = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && isOwnForum(c)) as ForumChannel | undefined
   const forum =
     found ??
     (await guild.channels
       .create({
-        name: cfg.archiveForumName,
+        name: FORUM_NAME,
         type: ChannelType.GuildForum,
         parent: state.categoryId,
         topic: m.forumTopic,
@@ -393,23 +398,7 @@ async function archiveToForum(t: Tracked) {
   const st = t.st
   const ch = await channelOf(t)
   if (ch) await queues.get(ch.id) // let pending mirror posts land first
-  const forum = await archiveForum()
-  const md = conversationMarkdown(st)
-  const content = [
-    MACHINE ? `💻 **${MACHINE}**` : '',
-    `📂 \`${st.cwd}\``,
-    `🆔 \`${t.sessionId}\``,
-    m.endedAt(`<t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`),
-    st.lastPrompt ? m.lastPrompt(clip(st.lastPrompt, 300)) : '',
-    m.resumeHint,
-  ]
-    .filter(Boolean)
-    .join('\n')
-  const message = {
-    content,
-    components: [resumeRow(t.sessionId)],
-    files: md ? [new AttachmentBuilder(Buffer.from(md, 'utf8'), { name: 'conversation.md' })] : [],
-  }
+  const message = archiveMessage(t.sessionId, st)
   let thread: AnyThreadChannel | undefined
   if (st.archiveThreadId) {
     // Ended again after a resume: add to the existing post.
@@ -420,46 +409,71 @@ async function archiveToForum(t: Tracked) {
       await thread.send(message)
     }
   }
-  if (!thread) {
-    const name = clip(st.title || st.lastPrompt || basename(st.cwd) || t.sessionId, 100)
-    const tag = MACHINE ? await machineTag(forum) : undefined
-    thread = await forum.threads.create({ name, message, appliedTags: tag ? [tag] : [] })
-  }
+  thread ??= await createArchivePost(st, message)
   // Point the session at the post before deleting the channel, so channelDelete doesn't forget it.
   st.archiveThreadId = st.channelId = thread.id
   stateDirty = true
   await ch?.delete('discord-sync: archived to forum').catch(e => log('delete after archive failed:', e?.message))
 }
 
-/**
- * Multi-machine mode: the forum tag named after this computer, created if
- * missing, so the forum can be filtered by computer. Undefined if the forum is
- * out of tags (Discord allows 20) or can't be edited.
- */
-async function machineTag(forum: ForumChannel): Promise<string | undefined> {
-  const name = MACHINE!.slice(0, 20)
-  const find = () => forum.availableTags.find(t => t.name === name)?.id
-  if (find()) return find()
-  if (forum.availableTags.length >= 20) return undefined
-  await forum.setAvailableTags([...forum.availableTags, { name, emoji: { id: null, name: '💻' } }]).catch(e => log('adding forum tag failed:', e?.message ?? e))
-  return find()
+async function createArchivePost(st: SessionState, message: ReturnType<typeof archiveMessage>): Promise<AnyThreadChannel> {
+  const forum = await archiveForum()
+  const name = clip(st.title || st.lastPrompt || basename(st.cwd) || 'session', 100)
+  return forum.threads.create({ name, message })
 }
 
-/** Tag this computer's forum posts from before multi-machine mode (or before the tag existed). */
-async function tagOwnPosts() {
-  const forum = state.archiveForumId ? guild.channels.cache.get(state.archiveForumId) : undefined
-  if (forum?.type !== ChannelType.GuildForum) return
-  const tag = await machineTag(forum)
-  if (!tag) return
+/** A forum post's message: summary, resume button and the full conversation as .md. */
+function archiveMessage(sessionId: string, st: SessionState) {
+  const md = conversationMarkdown(st)
+  const content = [
+    `📂 \`${st.cwd}\``,
+    `🆔 \`${sessionId}\``,
+    m.endedAt(`<t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`),
+    st.lastPrompt ? m.lastPrompt(clip(st.lastPrompt, 300)) : '',
+    m.resumeHint,
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return {
+    content,
+    components: [resumeRow(sessionId)],
+    files: md ? [new AttachmentBuilder(Buffer.from(md, 'utf8'), { name: 'conversation.md' })] : [],
+  }
+}
+
+/**
+ * Multi-machine mode switched on: this computer's posts in the forum all
+ * computers used to share are posted again in its own forum (posts can't be
+ * moved) and the old ones deleted. Sessions whose transcript is gone stay put;
+ * their resume button keeps working. The shared forum goes once it's empty.
+ */
+async function moveOwnPosts() {
+  if (!forumAvailable()) return
+  const own = await archiveForum()
+  const left = new Set<string>()
   for (const st of Object.values(state.sessions)) {
-    if (!st.ended || !st.archiveThreadId) continue
+    if (!st.ended || !st.archiveThreadId || st.channelId !== st.archiveThreadId) continue
     const post = await guild.channels.fetch(st.archiveThreadId).catch(() => null)
-    if (!post?.isThread() || post.appliedTags.includes(tag) || post.appliedTags.length >= 5) continue
-    // Editing an archived post would reopen it; keep it closed afterwards.
-    const wasArchived = post.archived
-    if (wasArchived) await post.setArchived(false).catch(() => {})
-    await post.setAppliedTags([...post.appliedTags, tag]).catch(() => {})
-    if (wasArchived) await post.setArchived(true).catch(() => {})
+    if (!post?.isThread() || !post.parentId || post.parentId === own.id) continue
+    const sid = Object.keys(state.sessions).find(k => state.sessions[k] === st)!
+    if (!st.transcript || !statSync(st.transcript, { throwIfNoEntry: false })) {
+      left.add(post.parentId)
+      continue
+    }
+    const moved = await createArchivePost(st, archiveMessage(sid, st))
+    st.archiveThreadId = st.channelId = moved.id
+    stateDirty = true
+    await post.delete('discord-sync: moved to this computer\'s forum').catch(e => log('delete old post failed:', e?.message))
+    log(`moved archive of ${sid} to ${own.name}`)
+  }
+  // The shared forum: delete it once no computer has posts there.
+  const shared = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && c.name === discordName(cfg.archiveForumName)) as ForumChannel | undefined
+  if (!shared || shared.id === own.id || left.has(shared.id)) return
+  const active = await shared.threads.fetchActive().catch(() => undefined)
+  const archived = await shared.threads.fetchArchived({ limit: 1 }).catch(() => undefined)
+  if (active?.threads.size === 0 && archived?.threads.size === 0) {
+    await shared.delete('discord-sync: every computer has its own archive forum now').catch(() => {})
+    log(`deleted the empty shared forum ${shared.name}`)
   }
 }
 
@@ -1854,11 +1868,12 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
 let cleanedAt = 0
 
 async function cleanupEnded() {
-  if (cfg.deleteEndedAfterDays <= 0 || Date.now() - cleanedAt < 10 * 60_000) return
+  if (cfg.deleteEndedAfterDays === 0 || Date.now() - cleanedAt < 10 * 60_000) return
   cleanedAt = Date.now()
-  const cutoff = Date.now() - cfg.deleteEndedAfterDays * 86_400_000
   for (const [sid, st] of Object.entries(state.sessions)) {
-    if (!st.ended || !st.endedAt || st.endedAt > cutoff || tracked.has(sid) || creating.has(sid)) continue
+    // Forum posts take no room in the channel list, so by default they stay; archived text channels go after a week.
+    const days = cfg.deleteEndedAfterDays ?? (st.archiveThreadId && st.channelId === st.archiveThreadId ? 0 : 7)
+    if (!days || !st.ended || !st.endedAt || st.endedAt > Date.now() - days * 86_400_000 || tracked.has(sid) || creating.has(sid)) continue
     const ch = await guild.channels.fetch(st.channelId).catch(() => null)
     await ch?.delete('discord-sync: session ended long ago').catch(e => log(`delete #${ch.name} failed:`, e?.message))
     delete state.sessions[sid]
@@ -2249,7 +2264,13 @@ let warnedDuplicate = false
 /** Discord's form of a text channel name. */
 const discordName = (name: string) => name.toLowerCase().replace(/\s+/g, '-')
 
-const parentOf = (channelId: string): string | undefined => (guild.channels.cache.get(channelId) as { parentId?: string | null } | undefined)?.parentId ?? undefined
+/** The category a channel is in; for a thread or forum post, its parent channel's category. */
+function parentOf(channelId: string): string | undefined {
+  const ch = guild.channels.cache.get(channelId)
+  if (!ch) return undefined
+  if (ch.isThread()) return ch.parent?.parentId ?? undefined
+  return ch.parentId ?? undefined
+}
 
 /** The oldest channel by that name, so two computers that created one at once still meet in the same one. */
 async function devicesChannel(): Promise<TextChannel> {
@@ -2353,9 +2374,9 @@ function channelOwner(channelId: string): string | undefined {
 }
 
 /**
- * Belongs to no computer for sure. Threads and the shared archive are excluded:
- * an archived session's post belongs to whichever computer ran it, and only
- * that one knows.
+ * Belongs to no computer for sure. Threads nobody claims and the shared
+ * archive are excluded: posts left in the forum computers used to share belong
+ * to whichever computer ran them, and only that one knows.
  */
 function isNeutral(channelId: string): boolean {
   const ch = guild.channels.cache.get(channelId)
@@ -2557,7 +2578,7 @@ client.once('clientReady', async c => {
   if (MACHINE) {
     await machineTick().catch(e => log('devices update failed:', e?.message ?? e))
     setInterval(() => void machineTick().catch(e => log('devices update failed:', e?.message ?? e)), DEVICES_REFRESH_MS)
-    void tagOwnPosts().catch(e => log('tagging forum posts failed:', e?.message ?? e))
+    void moveOwnPosts().catch(e => log('moving forum posts failed:', e?.message ?? e))
     log(`multi-machine mode: this is "${MACHINE}"`)
   }
   log(`syncing into ${guild.name} (${guild.id})`)

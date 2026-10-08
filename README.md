@@ -32,7 +32,7 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 - **Session control:** `/new`, `/stop`, `/end`, `/resume` (or `!new`, `!stop`, …). New and resumed sessions run in a detached tmux session you can `tmux attach` to locally.
 - **Console channel** listing every session with its status, plus menus to stop / end / resume and a button to start a new one.
 - **Forum archive.** Ended sessions become a forum post with the full conversation attached and a *Resume* button. Falls back to an archive category if the server can't create forums.
-- **Cleanup.** Archived sessions are deleted after a configurable number of days.
+- **Cleanup.** Forum posts are kept; archived text channels (when no forum can be used) are deleted after a week. Both are configurable.
 
 ## Requirements
 
@@ -170,8 +170,7 @@ By default, use one bot per computer. To share one bot and server between comput
 
 Set it on **every** computer that shares the bot, with a different name on each, then restart their daemons. Each computer then:
 
-- gets its own category (`Claude Sessions · home-server`) and console (`claude-console-home-server`); its existing channels move there;
-- tags its posts in the shared archive forum with its name (filter the forum by tag to see one computer's sessions);
+- gets its own category (`Claude Sessions · home-server`) holding its console (`claude-console-home-server`), its session channels and its archive forum (`claude-archive-home-server`). Its existing channels move there, and its posts in the forum the computers used to share are posted again in its own forum (the shared one is deleted once empty);
 - keeps an entry in a shared `#claude-devices` channel, updated every minute, so the computers know who is online;
 - handles only what happens in its own channels. `/new` takes a computer first (autocomplete lists them) and runs only there.
 
@@ -190,7 +189,6 @@ Every computer receives every command. Without talking to each other, they agree
   "consoleChannelName": "claude-console",
   "archiveForumName": "claude-archive",
   "archiveCategoryName": "Claude Sessions (ended)",
-  "deleteEndedAfterDays": 7,
   "kinds": ["interactive"],
   "backlog": 15,
   "showToolCalls": true,
@@ -210,7 +208,7 @@ Every computer receives every command. Without talking to each other, they agree
 | `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
 | `archiveForumName` | Forum for ended sessions, default `claude-archive` (`claude-已結束` in zh-TW); `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
 | `archiveCategoryName` | Archive category when no forum is used; `""` leaves channels in place |
-| `deleteEndedAfterDays` | Delete archived sessions after this many days; `0` keeps them |
+| `deleteEndedAfterDays` | Delete archived sessions this many days after they ended; `0` keeps them. Unset: forum posts are kept, archived text channels (no forum) are deleted after 7 days |
 | `kinds` | Session kinds to mirror, from `~/.claude/sessions/<pid>.json` |
 | `backlog` | Past messages to post when a channel is created for an already-running session |
 | `showToolCalls` | Post one-line tool call summaries |

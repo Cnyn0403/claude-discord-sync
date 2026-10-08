@@ -32,7 +32,7 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 - **控制 session：** `/new`、`/stop`、`/end`、`/resume`（也可以用 `!new`、`!stop`…）。開新的或恢復的 session 會在背景的 tmux 裡執行，本機可以用 `tmux attach` 接手。
 - **控制台頻道：** 列出所有 session 的狀態，附「中斷 / 結束 / 恢復」選單和開新 session 的按鈕。
 - **論壇封存：** session 結束後會變成一篇論壇貼文，附完整對話和「恢復」按鈕。伺服器不能建立論壇時，會改用封存分類。
-- **自動清理：** 封存超過設定天數的 session 會被刪除。
+- **自動清理：** 論壇貼文會永久保留；無法使用論壇時封存成的文字頻道，一週後刪除。兩者都可以調整。
 
 ## 需求
 
@@ -170,8 +170,7 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
 
 共用 bot 的**每一台**電腦都要設定，而且名稱不能重複，設定後重啟各台的 daemon。之後每台電腦會：
 
-- 有自己的分類（`Claude Sessions · home-server`）和控制台（`claude-控制台-home-server`），原本的頻道會移過去；
-- 在共用的封存論壇裡，把自己的貼文加上電腦名稱的標籤（在論壇用標籤篩選，就能只看某台電腦的 session）；
+- 有自己的分類（`Claude Sessions · home-server`），裡面放自己的控制台（`claude-控制台-home-server`）、session 頻道和已結束論壇（`claude-已結束-home-server`）。原本的頻道會移過去，以前在共用論壇裡的貼文也會重新發到自己的論壇（共用論壇空了之後會刪除）；
 - 在共用的 `#claude-devices` 頻道保留一則訊息，每分鐘更新一次，讓各台電腦知道誰在線；
 - 只處理自己頻道裡的事。`/new` 的第一個選項是電腦（自動補全會列出來），只有被選到的那台會執行。
 
@@ -190,7 +189,6 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
   "consoleChannelName": "claude-控制台",
   "archiveForumName": "claude-已結束",
   "archiveCategoryName": "Claude Sessions (ended)",
-  "deleteEndedAfterDays": 7,
   "kinds": ["interactive"],
   "backlog": 15,
   "showToolCalls": true,
@@ -210,7 +208,7 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
 | `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立。預設是 `claude-控制台`（英文介面是 `claude-console`） |
 | `archiveForumName` | 封存用的論壇，預設是 `claude-已結束`（英文介面是 `claude-archive`）；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |
 | `archiveCategoryName` | 沒用論壇時的封存分類；設成 `""` 就讓頻道留在原地 |
-| `deleteEndedAfterDays` | 封存幾天後刪除；設成 `0` 就永遠保留 |
+| `deleteEndedAfterDays` | session 結束幾天後刪除封存；設成 `0` 就永遠保留。沒設定時：論壇貼文永久保留，沒有論壇時封存成的文字頻道 7 天後刪除 |
 | `kinds` | 要同步的 session 類型，對應 `~/.claude/sessions/<pid>.json` 裡的 `kind` |
 | `backlog` | 為已經在跑的 session 建頻道時，最多補貼幾則舊訊息 |
 | `showToolCalls` | 是否貼出工具呼叫的一行摘要 |
