@@ -18,6 +18,9 @@ const en = {
   channelConnected: '-# 🔗 discord-sync channel connected, you can talk here',
   readOnlyReply: '⚠️ This session is read-only (it did not load the discord-sync channel). Start Claude Code with `ccd` to talk from Discord.',
   done: (duration: string) => `✅ Claude is done (${duration})`,
+  statusWorking: (elapsed: string, doing: string) => `-# ⏳ Working · ${elapsed} · ${doing}`,
+  statusTool: (label: string, running?: string) => (running ? `🔧 ${label} (${running})` : `🔧 ${label}`),
+  statusThinking: '💭 thinking',
   duration: (min: number, sec: number) => (min ? `${min}m ${sec}s` : `${sec}s`),
 
   // rendering
@@ -201,6 +204,9 @@ const zhTW: Messages = {
   channelConnected: '-# 🔗 discord-sync channel 已連線，可以在這裡對話',
   readOnlyReply: '⚠️ 這個 session 是唯讀的（沒有載入 discord-sync channel）。要從 Discord 對話，請用 `ccd` 啟動 Claude Code。',
   done: duration => `✅ Claude 完成了（${duration}）`,
+  statusWorking: (elapsed, doing) => `-# ⏳ 工作中 · ${elapsed} · ${doing}`,
+  statusTool: (label, running) => (running ? `🔧 ${label}（${running}）` : `🔧 ${label}`),
+  statusThinking: '💭 思考中',
   duration: (min, sec) => (min ? `${min} 分 ${sec} 秒` : `${sec} 秒`),
 
   localInput: '👤 **本地輸入**',

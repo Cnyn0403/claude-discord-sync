@@ -31,6 +31,7 @@ import {
   type MessageActionRowComponentBuilder,
   type RepliableInteraction,
   AttachmentBuilder,
+  MessageFlags,
   SlashCommandBuilder,
   cleanContent,
 } from 'discord.js'
@@ -42,7 +43,7 @@ import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, 
 import { basename, dirname, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
-import { renderRecord, titleOf, pack, chunk, type Block, type RenderContext, type Post } from './render'
+import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
@@ -75,6 +76,8 @@ type SessionState = {
   pausedSkipped?: number
   /** A discussion among people in the channel, not sent to Claude until someone @-mentions the bot. */
   meeting?: Meeting
+  /** The live "working…" message while Claude is busy, kept so a restarted daemon can remove it. */
+  statusMessageId?: string
 }
 
 type Meeting = { startMessageId: string; startedAt: number; lastAt: number; reminded?: boolean }
@@ -158,6 +161,12 @@ type Tracked = {
   busySince?: number
   /** A stop-hook flag file is waiting for this session's next tool call. */
   stopFlag?: boolean
+  /** The tool Claude is running now (undefined: thinking or writing), for the status message. */
+  activity?: { label: string; since: number }
+  /** Messages were posted below the status message, so it should move back to the bottom. */
+  statusStale?: boolean
+  statusAt?: number
+  statusUpdating?: boolean
 }
 const tracked = new Map<string, Tracked>()
 const creating = new Set<string>()
@@ -197,6 +206,7 @@ async function post(t: Tracked, posts: Post[]) {
       await enqueue(ch.id, () => ch.send({ content: p.content, files: [file], allowedMentions: { parse: [] } }))
     }
   }
+  if (posts.length && t.st.statusMessageId) t.statusStale = true
 }
 
 // ---- guild / categories --------------------------------------------------
@@ -299,6 +309,7 @@ async function startTracking(s: LiveSession) {
 
 async function endTracking(t: Tracked) {
   pump(t)
+  await refreshStatus(t, false).catch(() => {})
   await post(t, [m.sessionEnded])
   t.st.ended = true
   t.st.endedAt = Date.now()
@@ -519,6 +530,7 @@ function pump(t: Tracked) {
   const blocks: Block[] = []
   let newTitle: string | undefined
   for (const o of records) {
+    trackActivity(t, o)
     const title = titleOf(o)
     if (title && title !== t.st.title) newTitle = title
     blocks.push(...renderRecord(o, t.ctx))
@@ -539,6 +551,73 @@ function pump(t: Tracked) {
   }
 }
 
+/** Follow the main thread's tool calls: a tool_use starts one, its result (or new text) ends it. */
+function trackActivity(t: Tracked, o: any) {
+  if (o?.isSidechain || !Array.isArray(o?.message?.content)) return
+  for (const item of o.message.content) {
+    if (o.type === 'assistant' && item?.type === 'tool_use') t.activity = { label: toolLabel(item.name, item.input), since: Date.now() }
+    else if ((o.type === 'assistant' && item?.type === 'text') || (o.type === 'user' && item?.type === 'tool_result')) t.activity = undefined
+  }
+}
+
+// ---- live status message ---------------------------------------------------
+
+/** Quick turns get no status message; it appears once Claude has worked this long. */
+const STATUS_AFTER_MS = 5000
+const STATUS_EVERY_MS = 10_000
+/** How soon a buried status message may move back to the bottom. */
+const STATUS_MOVE_MS = 4000
+
+function statusText(t: Tracked): string {
+  const now = Date.now()
+  const a = t.activity
+  const doing = a ? m.statusTool(a.label, now - a.since >= 10_000 ? formatDuration(now - a.since) : undefined) : m.statusThinking
+  return m.statusWorking(formatDuration(now - (t.busySince ?? now)), doing)
+}
+
+/** Show, update, move or remove the status message, at most one change at a time per session. */
+function updateStatus(t: Tracked) {
+  if (t.statusUpdating) return
+  const show =
+    cfg.liveStatus && t.live?.status === 'busy' && !isPaused(t.st) && t.busySince !== undefined && Date.now() - t.busySince >= STATUS_AFTER_MS
+  if (!show && !t.st.statusMessageId) return
+  if (show && t.st.statusMessageId && Date.now() - (t.statusAt ?? 0) < (t.statusStale ? STATUS_MOVE_MS : STATUS_EVERY_MS)) return
+  t.statusUpdating = true
+  refreshStatus(t, show)
+    .catch(e => log('status update failed:', e?.message ?? e))
+    .finally(() => (t.statusUpdating = false))
+}
+
+/** Edit the status message in place, or (when buried or gone) post a new one and delete the old. */
+async function refreshStatus(t: Tracked, show: boolean) {
+  const ch = await channelOf(t)
+  if (!ch) return
+  const old = t.st.statusMessageId
+  if (!show) {
+    if (!old) return
+    t.st.statusMessageId = undefined
+    t.statusStale = false
+    stateDirty = true
+    await enqueue(ch.id, () => ch.messages.delete(old)).catch(() => {})
+    return
+  }
+  t.statusAt = Date.now()
+  const content = statusText(t)
+  if (old && !t.statusStale) {
+    const edited = await enqueue(ch.id, () => ch.messages.edit(old, { content })).then(
+      () => true,
+      () => false,
+    )
+    if (edited) return
+  }
+  t.statusStale = false
+  // No notification: it's replaced every few seconds.
+  const sent = await enqueue(ch.id, () => ch.send({ content, flags: MessageFlags.SuppressNotifications, allowedMentions: { parse: [] } }))
+  t.st.statusMessageId = sent.id
+  stateDirty = true
+  if (old) await enqueue(ch.id, () => ch.messages.delete(old)).catch(() => {})
+}
+
 function noteLastPrompt(t: Tracked, blocks: Block[]) {
   const last = [...blocks].reverse().find(b => b.plain)?.plain
   if (last) t.st.lastPrompt = last.replace(/\s+/g, ' ').slice(0, 200)
@@ -556,7 +635,11 @@ function notifyWhenDone(t: Tracked) {
     t.busySince ??= Date.now()
     return
   }
-  if (status === 'idle' && t.stopFlag) clearStopFlag(t)
+  if (status === 'idle') {
+    if (t.stopFlag) clearStopFlag(t)
+    // An interrupted tool never gets its result; don't carry it into the next turn.
+    t.activity = undefined
+  }
   // Other non-idle states (e.g. waiting on a prompt) keep the stretch open.
   if (status !== 'idle' || t.busySince === undefined) return
   const elapsed = Date.now() - t.busySince
@@ -601,6 +684,7 @@ async function tick() {
       }
       pump(t)
       notifyWhenDone(t)
+      updateStatus(t)
       remindIdleMeeting(t)
       // Typing indicator while Claude is working (lasts ~10s per call).
       if (t.live?.status === 'busy' && !isPaused(t.st) && Date.now() - t.lastTyping > 8000) {

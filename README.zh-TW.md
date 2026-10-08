@@ -178,6 +178,7 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
   "backlog": 15,
   "showToolCalls": true,
   "notifyMinBusySec": 15,
+  "liveStatus": true,
   "attachOver": 3800
 }
 ```
@@ -196,6 +197,7 @@ Claude 會收到整段討論的 Markdown 檔（誰說了什麼、身分是什麼
 | `backlog` | 為已經在跑的 session 建頻道時，最多補貼幾則舊訊息 |
 | `showToolCalls` | 是否貼出工具呼叫的一行摘要 |
 | `notifyMinBusySec` | 工作至少幾秒才發完成通知；設成 `-1` 就關閉 |
+| `liveStatus` | Claude 工作時，在頻道底部保留一則訊息，顯示已經工作多久、正在用哪個工具；設成 `false` 就關閉 |
 | `attachOver` | 回覆超過幾個字就改成附檔 |
 
 環境變數 `DISCORD_SYNC_ASK_TIMEOUT`（秒，預設 600）決定選擇題或計畫在 Discord 上等多久，逾時就回到終端機作答。

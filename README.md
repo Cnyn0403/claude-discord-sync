@@ -178,6 +178,7 @@ While paused, nothing from the session is posted (not even its title in the cons
   "backlog": 15,
   "showToolCalls": true,
   "notifyMinBusySec": 15,
+  "liveStatus": true,
   "attachOver": 3800
 }
 ```
@@ -196,6 +197,7 @@ While paused, nothing from the session is posted (not even its title in the cons
 | `backlog` | Past messages to post when a channel is created for an already-running session |
 | `showToolCalls` | Post one-line tool call summaries |
 | `notifyMinBusySec` | Minimum turn length (seconds) for a done notification; `-1` disables |
+| `liveStatus` | While Claude works, keep one message at the bottom of the channel showing how long it has been working and which tool is running; `false` disables |
 | `attachOver` | Replies longer than this many characters are attached as `.md` |
 
 Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how long a question or plan waits on Discord before falling back to the terminal.

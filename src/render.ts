@@ -57,8 +57,7 @@ function renderUserText(raw: string): Block | undefined {
 }
 
 function summarizeTool(name: string, input: any, ctx: RenderContext): Block | undefined {
-  input ??= {}
-  if (name === 'AskUserQuestion' && Array.isArray(input.questions)) {
+  if (name === 'AskUserQuestion' && Array.isArray(input?.questions)) {
     if (ctx.askOnDiscord) return undefined
     const parts = input.questions.map((q: any, i: number) => {
       const opts = (q.options ?? [])
@@ -68,13 +67,18 @@ function summarizeTool(name: string, input: any, ctx: RenderContext): Block | un
     })
     return { kind: 'question', text: parts.join('\n\n') }
   }
-  if (name === 'ExitPlanMode' && typeof input.plan === 'string') {
+  if (name === 'ExitPlanMode' && typeof input?.plan === 'string') {
     if (ctx.askOnDiscord) return undefined
     return { kind: 'question', text: `${m.planPending}\n${input.plan}` }
   }
   // Our own tools post their own output.
   if (name.startsWith('mcp__discord-sync__')) return undefined
+  return { kind: 'tool', text: `-# 🔧 ${toolLabel(name, input)}` }
+}
 
+/** A tool call in one line: the name in bold plus its main argument, e.g. **Bash** `npm test`. */
+export function toolLabel(name: string, input: any): string {
+  input ??= {}
   let detail = ''
   switch (name) {
     case 'Bash':
@@ -105,7 +109,7 @@ function summarizeTool(name: string, input: any, ctx: RenderContext): Block | un
       detail = first ? code(first, 80) : ''
     }
   }
-  return { kind: 'tool', text: `-# 🔧 **${name}** ${detail}`.trimEnd() }
+  return `**${name}** ${detail}`.trimEnd()
 }
 
 export function renderRecord(o: any, ctx: RenderContext): Block[] {

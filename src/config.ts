@@ -39,6 +39,8 @@ export type Config = {
   showToolCalls: boolean
   /** @-mention allowFrom when Claude goes idle after working at least this many seconds. -1 = never. */
   notifyMinBusySec: number
+  /** While Claude works, keep one message in the channel showing how long and what it is doing. */
+  liveStatus: boolean
   /** Replies longer than this many characters are posted as a preview plus a .md attachment. */
   attachOver: number
   /** Channel listing every session with stop/end/resume menus. Empty string = no console. */
@@ -106,6 +108,7 @@ export function loadConfig(): Config {
     backlog: file.backlog ?? 15,
     showToolCalls: file.showToolCalls ?? true,
     notifyMinBusySec: file.notifyMinBusySec ?? 15,
+    liveStatus: file.liveStatus ?? true,
     attachOver: file.attachOver ?? 3800,
     consoleChannelName: file.consoleChannelName ?? m.consoleChannelName,
     deleteEndedAfterDays: file.deleteEndedAfterDays ?? 7,
