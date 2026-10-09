@@ -1,6 +1,6 @@
 {
   "name": "claude-discord-sync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Mirror every Claude Code session into its own Discord channel, and drive ccd sessions from Discord.",
   "license": "MIT",
   "private": true,
