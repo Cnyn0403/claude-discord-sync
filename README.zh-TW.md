@@ -24,7 +24,7 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 
 ## 功能
 
-- **每個 session 一個頻道。** 每個執行中的 Claude Code session 都有自己的頻道，你的輸入、Claude 的回覆和工具呼叫摘要都會即時同步。太長的回覆只貼預覽，全文附成 `.md` 檔。
+- **每個 session 一個頻道。** 每個執行中的 Claude Code session 都有自己的頻道，Claude Code 替 session 產生標題後（或用 `/rename` 命名後）頻道會改名為 `專案・標題`；你的輸入、Claude 的回覆和工具呼叫摘要都會即時同步。太長的回覆只貼預覽，全文附成 `.md` 檔。
 - **雙向對話：** 用 `ccd`（`claude` 的包裝指令）啟動的 session，在頻道裡傳的訊息和附件都會送給 Claude。
 - **選擇題和計畫變成按鈕：** `AskUserQuestion` 會變成下拉選單，可以選「其他」自己輸入；`ExitPlanMode` 會變成「核准 / 繼續修改 / 改在終端機回答」按鈕。
 - **權限請求**會附「允許 / 拒絕」按鈕並 @ 你。
@@ -117,6 +117,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/stop` | session 頻道 | 中斷目前的工作（按 Esc） |
 | `/end` | session 頻道 | 工作中的話先中斷，再 `/exit` |
 | `/resume` | 已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，頻道會從封存分類移回來 |
+| `/rename <名稱>` | session 頻道 | 替 session 命名。頻道本來就會依 Claude Code 自動產生的標題命名為 `專案・標題`；用這個指令（或 Claude Code 本身的 `/rename`）取的名字優先。session 在 tmux 裡且閒置時，也會一併送給 Claude Code，讓 `claude --resume` 顯示同樣的名稱 |
 | `/share @某人 <權限>` | session 頻道 | 把這個 session 分享給某人（見[分享](#分享)） |
 | `/unshare @某人` | session 頻道 | 取消分享 |
 | `/members` | session 頻道 | 列出誰可以存取這個 session |
@@ -134,7 +135,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | | 擁有者 | 完整 | 協作 | 觀看 |
 |---|---|---|---|---|
 | 看到頻道和對話 | ✅ | ✅ | ✅ | ✅ |
-| 對 Claude 說話、回答選擇題、`/stop` | ✅ | ✅ | ✅ | |
+| 對 Claude 說話、回答選擇題、`/stop`、`/rename` | ✅ | ✅ | ✅ | |
 | 核准權限請求和計畫 | ✅ | ✅ | | |
 | `/end`、`/share`、`/new`、`/resume`、控制台 | ✅ | | | |
 

@@ -65,6 +65,11 @@ type SessionState = {
   offset: number
   transcript?: string
   title?: string
+  /** The title was set with /rename (here or in Claude Code); Claude Code's generated titles no longer replace it. */
+  customTitle?: boolean
+  /** Channel name and topic last applied, so a rename is only sent when they change. */
+  appliedName?: string
+  appliedTopic?: string
   ended?: boolean
   /** When the session ended (ms); drives the resume list order and old-channel cleanup. */
   endedAt?: number
@@ -242,14 +247,72 @@ async function ensureCategory(name: string, cachedId: string | undefined): Promi
   return created.id
 }
 
-function channelName(s: LiveSession): string {
-  const base = basename(s.cwd) || 'root'
-  const slug = base
+/** The project (working folder) part of a channel name. */
+function projectSlug(cwd: string, max: number): string {
+  const slug = (basename(cwd) || 'root')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}_-]+/gu, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 80)
-  return `${slug || 'session'}-${s.sessionId.slice(0, 4)}`
+  return clip(slug || 'session', max)
+}
+
+/** "project・title" once the session has a title; "project-1a2b" until then. */
+function channelName(sessionId: string, st: SessionState): string {
+  if (!st.title) return `${projectSlug(st.cwd, 80)}-${sessionId.slice(0, 4)}`
+  return clip(`${projectSlug(st.cwd, 24)}・${st.title.replace(/\s+/g, ' ').trim()}`, 100)
+}
+
+/** A title record from the transcript; true if the session's title changed. /rename wins over generated titles. */
+function noteTitle(st: SessionState, o: any): boolean {
+  if (o?.type === 'custom-title' && typeof o.customTitle === 'string' && o.customTitle.trim()) {
+    const changed = st.title !== o.customTitle || !st.customTitle
+    st.title = o.customTitle
+    st.customTitle = true
+    return changed
+  }
+  if (st.customTitle) return false
+  const title = titleOf(o)
+  if (!title || title === st.title) return false
+  st.title = title
+  return true
+}
+
+/** Name and topic edits share Discord's limit of 2 per 10 minutes per channel. */
+const EDIT_WINDOW_MS = 10 * 60_000
+const channelEdits = new Map<string, number[]>()
+const syncing = new Set<string>()
+
+/** When the next channel edit is allowed (now if one is). */
+function nextEditAt(channelId: string): number {
+  const recent = (channelEdits.get(channelId) ?? []).filter(x => Date.now() - x < EDIT_WINDOW_MS)
+  channelEdits.set(channelId, recent)
+  return recent.length < 2 ? Date.now() : recent[0] + EDIT_WINDOW_MS
+}
+
+/**
+ * Bring the channel's name and topic in line with the session's title, in one
+ * edit. Edits beyond Discord's rate limit wait for a later tick.
+ */
+async function syncChannel(sessionId: string, st: SessionState) {
+  if (isPaused(st) || syncing.has(st.channelId)) return
+  const name = channelName(sessionId, st)
+  const topic = topicFor(sessionId, st)
+  if (st.appliedName === name && st.appliedTopic === topic) return
+  if (nextEditAt(st.channelId) > Date.now()) return
+  const ch = guild.channels.cache.get(st.channelId)
+  if (ch?.type !== ChannelType.GuildText) return
+  syncing.add(st.channelId)
+  channelEdits.get(st.channelId)!.push(Date.now())
+  try {
+    await ch.edit({ name, topic })
+    st.appliedName = name
+    st.appliedTopic = topic
+    stateDirty = true
+  } catch (e: any) {
+    log(`renaming #${ch.name} failed:`, e?.message ?? e)
+  } finally {
+    syncing.delete(st.channelId)
+  }
 }
 
 function topicFor(sessionId: string, st: SessionState): string {
@@ -293,12 +356,15 @@ async function startTracking(s: LiveSession) {
   } else {
     await makeRoom(1)
     ch = await guild.channels.create({
-      name: channelName(s),
+      name: channelName(s.sessionId, t.st),
       type: ChannelType.GuildText,
       parent: state.categoryId,
       topic: topicFor(s.sessionId, t.st),
     })
     t.st.channelId = ch.id
+    t.st.appliedName = channelName(s.sessionId, t.st)
+    t.st.appliedTopic = topicFor(s.sessionId, t.st)
+    channelEdits.set(ch.id, [])
     t.st.offset = 0
     await applyMembers(ch, t.st)
     // Resumed after its channel was deleted (or archived to the forum by an older version).
@@ -310,7 +376,7 @@ async function startTracking(s: LiveSession) {
       const tail = new JsonlTail(transcript)
       const blocks: Block[] = []
       for (const o of tail.read()) {
-        t.st.title = titleOf(o) ?? t.st.title
+        noteTitle(t.st, o)
         blocks.push(...renderRecord(o, t.ctx))
       }
       noteLastPrompt(t, blocks)
@@ -318,7 +384,6 @@ async function startTracking(s: LiveSession) {
       if (blocks.length > shown.length) await post(t, [m.skippedOlder(blocks.length - shown.length)])
       await post(t, pack(shown, cfg.attachOver))
       t.st.offset = tail.offset
-      if (t.st.title) await ch.setTopic(topicFor(s.sessionId, t.st)).catch(() => {})
     }
     log(`channel #${ch.name} created for ${s.sessionId}`)
   }
@@ -470,11 +535,9 @@ function pump(t: Tracked) {
   // ccd sessions post AskUserQuestion interactively via ask-hook.ts instead.
   t.ctx.askOnDiscord = !!t.live && peers.has(t.live.pid)
   const blocks: Block[] = []
-  let newTitle: string | undefined
   for (const o of records) {
     trackActivity(t, o)
-    const title = titleOf(o)
-    if (title && title !== t.st.title) newTitle = title
+    noteTitle(t.st, o)
     blocks.push(...renderRecord(o, t.ctx))
   }
   t.st.offset = t.tail.offset
@@ -486,11 +549,6 @@ function pump(t: Tracked) {
   }
   noteLastPrompt(t, blocks)
   if (blocks.length) void post(t, pack(blocks, cfg.attachOver))
-  if (newTitle) {
-    t.st.title = newTitle
-    // Topic edits are rate limited (2 per 10 min per channel); titles change rarely.
-    void channelOf(t).then(ch => ch?.setTopic(topicFor(t.sessionId, t.st)).catch(() => {}))
-  }
 }
 
 /** Follow the main thread's tool calls: a tool_use starts one, its result (or new text) ends it. */
@@ -626,6 +684,7 @@ async function tick() {
         continue
       }
       pump(t)
+      void syncChannel(t.sessionId, t.st)
       notifyWhenDone(t)
       updateStatus(t)
       remindIdleMeeting(t)
@@ -685,10 +744,10 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|sync|model|mode)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|sync|model|mode|rename)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
-    if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' ? 'chat' : 'owner')) {
+    if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' || name === 'rename' ? 'chat' : 'owner')) {
       void msg.react('🚫').catch(() => {})
       return
     }
@@ -702,6 +761,12 @@ client.on('messageCreate', async (msg: Message) => {
       const mode = (cmd[2] ?? '').trim()
       if (!isMode(mode)) return void (await msg.reply(m.modeUsage))
       await setMode(messageReplier(msg), msg.channelId, mode)
+      return
+    }
+    if (name === 'rename') {
+      const title = (cmd[2] ?? '').trim()
+      if (!title) return void (await msg.reply(m.renameUsage))
+      await renameSession(messageReplier(msg), msg.channelId, title)
       return
     }
     if (name === 'model') {
@@ -1507,6 +1572,9 @@ const SLASH_COMMANDS = [
       .setRequired(true)
       .addChoices(...MODES.map(v => ({ name: MODE_LABELS[v], value: v }))),
   ),
+  described(new SlashCommandBuilder().setName('rename'), 'rename').addStringOption(o =>
+    described(o.setName('name'), 'renameName').setRequired(true).setMaxLength(90),
+  ),
   described(new SlashCommandBuilder().setName('model'), 'model').addStringOption(o =>
     described(o.setName('name'), 'modelName').setRequired(true).setAutocomplete(true),
   ),
@@ -2242,11 +2310,11 @@ async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode', 'rename'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
-  const need: Need = i.commandName === 'members' ? 'view' : 'owner'
+  const need: Need = i.commandName === 'members' ? 'view' : i.commandName === 'rename' ? 'chat' : 'owner'
   if (!can(i.user.id, st, need) && !(i.commandName === 'sync' && isOwner(i.user.id))) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
@@ -2261,6 +2329,7 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
   if (i.commandName === 'sync') return setSync(r, i.channelId, i.options.getString('state') === 'on', i.user.username)
   if (i.commandName === 'mode') return setMode(r, i.channelId, i.options.getString('mode', true) as Mode)
   if (i.commandName === 'model') return setModel(r, i.channelId, i.options.getString('name', true).trim())
+  if (i.commandName === 'rename') return renameSession(r, i.channelId, i.options.getString('name', true).trim())
   const user = i.options.getUser('user', true)
   if (user.bot) return void (await r.reply(m.cantShareWithBot))
   await share(r, i.channelId, user.id, i.commandName === 'share' ? (i.options.getString('role', true) as Role) : undefined)
@@ -2340,6 +2409,40 @@ async function setModel(r: Replier, channelId: string, name: string) {
     const out = commandOutputSince(transcript, offset)
     if (out !== undefined) return void (await reply.edit(m.modelResult(out)).catch(() => {}))
   }
+}
+
+// ---- /rename -------------------------------------------------------------------
+
+/**
+ * Name a session: the channel becomes "project・name", and a running session
+ * idle in tmux or a console window gets Claude Code's own `/rename` too, so
+ * `claude --resume` lists it by the same name.
+ */
+async function renameSession(r: Replier, channelId: string, raw: string) {
+  const title = raw.replace(/\s+/g, ' ').trim().slice(0, 90)
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === channelId)
+  if (!entry) return void (await r.reply(m.notSessionChannel))
+  if (!title) return void (await r.reply(m.renameUsage))
+  const [sid, st] = entry
+  st.title = title
+  st.customTitle = true
+  stateDirty = true
+  const t = tracked.get(sid)
+  let local: 'sent' | 'busy' | 'no' = 'no'
+  if (t?.live && !isPaused(st)) {
+    if (t.live.status === 'busy') local = 'busy'
+    else {
+      const { error } = await typeInto(t.live.pid, peers.get(t.live.pid), [{ text: `/rename ${title}` }, 'Enter'])
+      if (!error) local = 'sent'
+    }
+  }
+  const at = nextEditAt(st.channelId)
+  await syncChannel(sid, st)
+  const lines = [m.renamed(channelName(sid, st))]
+  if (at > Date.now()) lines.push(m.renameLater(Math.ceil((at - Date.now()) / 60_000)))
+  if (local === 'sent') lines.push(m.renameLocalSent)
+  else if (local === 'busy') lines.push(m.renameLocalBusy)
+  await r.reply(lines.join('\n'))
 }
 
 /** The first local command output (`<local-command-stdout>`) written to the transcript after `offset`. */

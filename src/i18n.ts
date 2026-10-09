@@ -192,6 +192,11 @@ const en = {
   htmlFileNotEmbedded: (name: string, path?: string) => (path ? `${name} (not embedded; saved at ${path})` : `${name} (not downloaded)`),
   htmlGenerated: 'Meeting record from claude-discord-sync',
   meetingLastPrompt: '(meeting notes)',
+  renameUsage: 'Usage: `/rename <name>` (or `!rename <name>`) in a session channel.',
+  renamed: (name: string) => `✏️ Renamed to **${name}**`,
+  renameLater: (min: number) => `-# Discord allows 2 channel edits per 10 minutes; the channel name changes in about ${min} min.`,
+  renameLocalSent: '-# Also sent `/rename` to Claude Code, so `claude --resume` shows the same name.',
+  renameLocalBusy: "-# Claude is working, so Claude Code's own name wasn't changed; use `/rename` again when it's done to update it too.",
   meetingRecorded: (name: string, when: string, n: number, status: string, threadId: string, conclusion?: string) =>
     `🗣️ **Meeting recorded: ${name.replace(/^🗣️\s*/, '')}**\n-# ${when} · ${n} messages · ${status} · <#${threadId}> · open the HTML file in a browser to read it` +
     (conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''),
@@ -376,6 +381,11 @@ const zhTW: Messages = {
   htmlFileNotEmbedded: (name, path) => (path ? `${name}（沒有內嵌，存在 ${path}）` : `${name}（沒有下載到）`),
   htmlGenerated: 'claude-discord-sync 會議紀錄',
   meetingLastPrompt: '（會議記錄）',
+  renameUsage: '用法：在 session 頻道輸入 `/rename <名稱>`（或 `!rename <名稱>`）。',
+  renamed: name => `✏️ 已改名為 **${name}**`,
+  renameLater: min => `-# Discord 限制每個頻道 10 分鐘內只能修改 2 次，頻道名稱大約 ${min} 分鐘後會更新。`,
+  renameLocalSent: '-# 也已經對 Claude Code 送出 `/rename`，`claude --resume` 清單會顯示同樣的名稱。',
+  renameLocalBusy: '-# Claude 正在工作，所以沒有改到 Claude Code 本身的名稱；等它完成後再用一次 `/rename` 就會一起更新。',
   meetingRecorded: (name, when, n, status, threadId, conclusion) =>
     `🗣️ **會議已紀錄：${name.replace(/^🗣️\s*/, '')}**\n-# ${when} · ${n} 則訊息 · ${status} · <#${threadId}> · 用瀏覽器打開 HTML 檔閱讀` +
     (conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''),
@@ -406,6 +416,8 @@ export const SLASH_DESCRIPTIONS = {
   resume: { en: 'Resume this ended session', 'zh-TW': '恢復這個已結束的 session' },
   mode: { en: "Switch this session's permission mode (Shift+Tab)", 'zh-TW': '切換這個 session 的權限模式（Shift+Tab）' },
   modeName: { en: 'Mode', 'zh-TW': '模式' },
+  rename: { en: 'Name this session (channel name and Claude Code /rename)', 'zh-TW': '替這個 session 命名（頻道名稱和 Claude Code 的 /rename）' },
+  renameName: { en: 'The new name', 'zh-TW': '新的名稱' },
   model: { en: "Switch this session's model (/model)", 'zh-TW': '切換這個 session 的模型（/model）' },
   modelName: { en: 'Model: opus, sonnet, haiku, fable, default or a model ID', 'zh-TW': '模型：opus、sonnet、haiku、fable、default 或模型 ID' },
   share: { en: 'Share this session with someone', 'zh-TW': '把這個 session 分享給其他人' },

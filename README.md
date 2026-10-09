@@ -24,7 +24,7 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 
 ## Features
 
-- **One channel per session.** Every running Claude Code session gets a channel; your prompts, Claude's replies and one-line tool summaries are mirrored live. Long replies are posted as a preview plus a `.md` attachment.
+- **One channel per session.** Every running Claude Code session gets a channel, named `project・title` once Claude Code has titled the session (or after `/rename`); your prompts, Claude's replies and one-line tool summaries are mirrored live. Long replies are posted as a preview plus a `.md` attachment.
 - **Two-way chat** for sessions started with `ccd` (a wrapper around `claude`). Messages and attachments you post in the channel go to Claude.
 - **Questions and plans as components.** `AskUserQuestion` becomes select menus (with a free-text "other" option); `ExitPlanMode` becomes *Approve / Revise / Answer in terminal* buttons.
 - **Permission prompts** get *Allow / Deny* buttons and an @-mention.
@@ -117,6 +117,7 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/stop` | session channel | Interrupt the current turn (presses Esc) |
 | `/end` | session channel | Interrupt if busy, then `/exit` |
 | `/resume` | ended channel | `ccd --resume <id>` in tmux; the channel moves back from the archive |
+| `/rename <name>` | session channel | Name the session. Channels are named `project・title` from Claude Code's generated title anyway; a name given here (or with Claude Code's own `/rename`) takes precedence, and is also sent to Claude Code when the session is idle in tmux, so `claude --resume` shows it |
 | `/share @user <role>` | session channel | Give someone access to this session (see [Sharing](#sharing)) |
 | `/unshare @user` | session channel | Remove their access |
 | `/members` | session channel | List who can access this session |
@@ -134,7 +135,7 @@ Session channels are private: only the bot and the owners in `allowFrom` can see
 | | Owner | Full | Collaborate | View |
 |---|---|---|---|---|
 | See the channel and conversation | ✅ | ✅ | ✅ | ✅ |
-| Talk to Claude, answer questions, `/stop` | ✅ | ✅ | ✅ | |
+| Talk to Claude, answer questions, `/stop`, `/rename` | ✅ | ✅ | ✅ | |
 | Approve permission prompts and plans | ✅ | ✅ | | |
 | `/end`, `/share`, `/new`, `/resume`, the console | ✅ | | | |
 
