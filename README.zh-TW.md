@@ -117,6 +117,8 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/stop` | session 頻道 | 中斷目前的工作（按 Esc） |
 | `/end` | session 頻道 | 工作中的話先中斷，再 `/exit` |
 | `/resume` | 已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，頻道會從封存分類移回來 |
+| `/usage` | 任何頻道 | 只有你看得到。在 session 頻道：模型、上下文用量、token 和執行時間；其他頻道：所有進行中 session 的上下文用量。擁有者還會看到方案的本時段和本週用量 |
+| `/handoff [補充]` | session 頻道 | 產生交接表（見[交接](#交接)） |
 | `/rename <名稱>` | session 頻道 | 替 session 命名。頻道本來就會依 Claude Code 自動產生的標題命名為 `專案・標題`；用這個指令（或 Claude Code 本身的 `/rename`）取的名字優先。session 在 tmux 裡且閒置時，也會一併送給 Claude Code，讓 `claude --resume` 顯示同樣的名稱 |
 | `/share @某人 <權限>` | session 頻道 | 把這個 session 分享給某人（見[分享](#分享)） |
 | `/unshare @某人` | session 頻道 | 取消分享 |
@@ -154,6 +156,26 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 **會議紀錄：**每則訊息都會即時寫進 `~/.claude/channels/discord-sync/meetings/<session-id>/<討論串-id>.jsonl`（另外有一份 `.md`，交給 Claude 的就是它），所以就算討論串被刪掉、或會議沒有正式結束，紀錄都還在。會議結束時，session 頻道會出現一則**「會議已紀錄」**並釘選，附上整理好的**獨立 HTML 網頁**：排版像 Discord，有頭像、名稱、時間，Markdown（含程式碼區塊和表格）和圖片都正確顯示，所有內容都包在檔案裡，不需要網路就能用瀏覽器打開。所以頻道的釘選訊息就是這個 session 開過的所有會議。session 結束時還沒結束的會議會保存並紀錄，但不會交給 Claude。釘選需要「釘選訊息」（Pin Messages）權限；沒有的話會照樣發出紀錄，只是不釘選。
 
 只有看得到 session 頻道的人才能加入（用 `/share` 分享）。會議 30 分鐘沒人說話時，bot 會提醒一次；它不會自己把會議交給 Claude。同時 tag 人和 bot 的訊息會當成一般訊息交給 Claude，不會開會議。
+
+## 用量
+
+`ccd` 啟動的 session 會掛上一個小的狀態列程式（`claude-discord-sync statusline`），把 Claude Code 交給狀態列的資料存下來：上下文視窗用量、方案的本時段和本週限制、累計數字。如果你在 `~/.claude/settings.json` 設了自己的狀態列，會用同樣的輸入照常執行，終端機看起來不變。一般 `claude` 啟動的 session 只能從 transcript 得知上下文大小。
+
+- **控制台：**最上方顯示方案用量（`📊 本時段 40% · 2 小時後重置 · 本週 15% · …`），每個進行中的 session 後面顯示上下文用量（`🧠 35%`），以 5% 為單位。
+- **即時狀態訊息：**在 Claude 正在做的事旁邊顯示上下文用量。
+- **`/usage`：**詳細資料，只有你看得到（見[指令](#指令)）。
+- **上下文提醒：**session 的上下文超過 80% 時，頻道會提醒一次，並附上「產生交接表」按鈕。上下文降到 50% 以下（`/compact`、`/clear` 之後）會重新啟用提醒。
+
+不顯示費用：訂閱方案下，等值 API 費用並不是你實際支付的金額。
+
+## 交接
+
+`/handoff [補充]`（或 `!handoff`，或上下文提醒上的按鈕）會像會議一樣，由唯讀分身替這個 session 撰寫交接表，讓看不到這段對話的新 session 可以接手：目標、已完成的事、目前狀態、重要決定和原因、未解決的問題、下一步、關鍵檔案、驗證方式。daemon 會把 git 分支、未提交的修改和最近的 commit 一起交給它。不會打斷原本的 session，Claude 正在工作時也能用。
+
+交接表會存在 `~/.claude/channels/discord-sync/handoffs/<session-id>/`，並發到 session 頻道釘選，附兩個按鈕：
+
+- **用這份交接開新 session：**在同一個資料夾啟動 `ccd`，請它先讀交接表、再從「下一步」繼續。新舊頻道會互相附上連結。
+- **結束這個 session：**等同 `/end`。不會自動結束任何 session。
 
 ## 暫停同步
 

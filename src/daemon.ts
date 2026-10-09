@@ -48,6 +48,7 @@ import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderC
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
 import { meetingHtml, type HtmlLabels } from './meeting-html'
+import { readSnapshot, tokens, type PlanLimit } from './usage'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
 import { daemonRunning } from './autostart'
@@ -70,6 +71,8 @@ type SessionState = {
   /** Channel name and topic last applied, so a rename is only sent when they change. */
   appliedName?: string
   appliedTopic?: string
+  /** The "context is filling up" warning was posted; cleared once the context shrinks again. */
+  contextWarned?: boolean
   ended?: boolean
   /** When the session ended (ms); drives the resume list order and old-channel cleanup. */
   endedAt?: number
@@ -195,6 +198,8 @@ type Tracked = {
   statusStale?: boolean
   statusAt?: number
   statusUpdating?: boolean
+  /** Context size from the transcript's last reply, for sessions without a status line snapshot. */
+  ctxTokens?: number
 }
 const tracked = new Map<string, Tracked>()
 const creating = new Set<string>()
@@ -377,6 +382,7 @@ async function startTracking(s: LiveSession) {
       const blocks: Block[] = []
       for (const o of tail.read()) {
         noteTitle(t.st, o)
+        noteContext(t, o)
         blocks.push(...renderRecord(o, t.ctx))
       }
       noteLastPrompt(t, blocks)
@@ -538,6 +544,7 @@ function pump(t: Tracked) {
   for (const o of records) {
     trackActivity(t, o)
     noteTitle(t.st, o)
+    noteContext(t, o)
     blocks.push(...renderRecord(o, t.ctx))
   }
   t.st.offset = t.tail.offset
@@ -572,7 +579,8 @@ function statusText(t: Tracked): string {
   const now = Date.now()
   const a = t.activity
   const doing = a ? m.statusTool(a.label, now - a.since >= 10_000 ? formatDuration(now - a.since) : undefined) : m.statusThinking
-  return m.statusWorking(formatDuration(now - (t.busySince ?? now)), doing)
+  const ctx = contextLabel(contextOf(t))
+  return m.statusWorking(formatDuration(now - (t.busySince ?? now)), ctx ? `${doing} · ${ctx}` : doing)
 }
 
 /** Show, update, move or remove the status message, at most one change at a time per session. */
@@ -685,6 +693,7 @@ async function tick() {
       }
       pump(t)
       void syncChannel(t.sessionId, t.st)
+      warnContext(t)
       notifyWhenDone(t)
       updateStatus(t)
       remindIdleMeeting(t)
@@ -744,10 +753,10 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|sync|model|mode|rename)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|sync|model|mode|rename|handoff)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
-    if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' || name === 'rename' ? 'chat' : 'owner')) {
+    if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' || name === 'rename' || name === 'handoff' ? 'chat' : 'owner')) {
       void msg.react('🚫').catch(() => {})
       return
     }
@@ -761,6 +770,10 @@ client.on('messageCreate', async (msg: Message) => {
       const mode = (cmd[2] ?? '').trim()
       if (!isMode(mode)) return void (await msg.reply(m.modeUsage))
       await setMode(messageReplier(msg), msg.channelId, mode)
+      return
+    }
+    if (name === 'handoff') {
+      await makeHandoff(messageReplier(msg), msg.channelId, (cmd[2] ?? '').trim() || undefined)
       return
     }
     if (name === 'rename') {
@@ -862,6 +875,10 @@ client.on('interactionCreate', async (i: Interaction) => {
     await i.deferReply()
     const r = interactionReplier(i)
     await runCommand(r, i.channelId, i.commandName as Command, i.options.getString('dir') ?? undefined, i.options.getString('prompt') ?? undefined)
+    return
+  }
+  if (i.isButton() && i.customId.startsWith('handoff:')) {
+    await handleHandoffButton(i).catch(e => log('handoff button failed:', e?.message ?? e))
     return
   }
   if (i.isButton() && i.customId.startsWith('resume:')) {
@@ -1267,7 +1284,7 @@ async function startInConsole(dir: string, args: string[], resumeId?: string): P
 }
 
 /** Start ccd for /new or /resume, accept its startup dialogs, and report its channel once it registers. */
-async function launchSession(r: Replier, dir: string, args: string[], resumeId?: string) {
+async function launchSession(r: Replier, dir: string, args: string[], resumeId?: string): Promise<Tracked | undefined> {
   let l: Launch
   if (hasTmux()) l = await startInTmux(dir, args)
   else if (IS_WIN) l = await startInConsole(dir, args, resumeId)
@@ -1284,7 +1301,7 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
     if (t?.st.channelId) {
       await l.registered()
       await status.edit(m.started(l.name, t.st.channelId, l.hint))
-      return
+      return t
     }
     const p = await l.poll()
     if (!p) return void (await status.edit(m.launchGone(l.name)))
@@ -1572,6 +1589,8 @@ const SLASH_COMMANDS = [
       .setRequired(true)
       .addChoices(...MODES.map(v => ({ name: MODE_LABELS[v], value: v }))),
   ),
+  described(new SlashCommandBuilder().setName('usage'), 'usage'),
+  described(new SlashCommandBuilder().setName('handoff'), 'handoff').addStringOption(o => described(o.setName('note'), 'handoffNote').setMaxLength(1000)),
   described(new SlashCommandBuilder().setName('rename'), 'rename').addStringOption(o =>
     described(o.setName('name'), 'renameName').setRequired(true).setMaxLength(90),
   ),
@@ -1643,11 +1662,13 @@ function recentEnded(n: number): [string, SessionState][] {
 function consoleView() {
   const live = [...tracked.values()].filter(t => t.live)
   const ended = recentEnded(25)
-  const lines = ['## 🖥️ Claude Sessions', ...(state.pausedAll ? [m.allPausedBanner] : []), m.running]
+  const planLine = planSummary(5)
+  const lines = ['## 🖥️ Claude Sessions', ...(planLine ? [`📊 ${planLine}`] : []), ...(state.pausedAll ? [m.allPausedBanner] : []), m.running]
   if (!live.length) lines.push(m.none)
   for (const t of live) {
     const topic = sessionTopic(t.st)
-    lines.push(`${isPaused(t.st) ? m.pausedTag + ' ' : ''}${statusIcon(t.live!.status)} · <#${t.st.channelId}> · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
+    const ctx = isPaused(t.st) ? '' : contextLabel(contextOf(t), 5)
+    lines.push(`${isPaused(t.st) ? m.pausedTag + ' ' : ''}${statusIcon(t.live!.status)} · <#${t.st.channelId}>${ctx ? ` · ${ctx}` : ''} · \`${t.st.cwd}\`${topic ? ` · ${clip(topic, 60)}` : ''}`)
   }
   lines.push('', m.recentlyEnded)
   if (!ended.length) lines.push(m.none)
@@ -2211,16 +2232,19 @@ async function postMeetingRecord(t: Tracked, mt: Meeting, html: string | undefin
   const sent = await enqueue(ch.id, () =>
     ch.send({ content, files, allowedMentions: { parse: [] } }).catch(() => ch.send({ content, allowedMentions: { parse: [] } })),
   )
-  const pinned = await sent.pin().then(
-    () => true,
-    e => void log('pinning the meeting record failed (the bot needs Pin Messages):', e?.message ?? e),
-  )
-  if (pinned) {
-    // Discord announces every pin; the record itself already says it all.
-    const after = await ch.messages.fetch({ after: sent.id, limit: 10 }).catch(() => undefined)
-    for (const x of after?.values() ?? []) if (x.type === MessageType.ChannelPinnedMessage && x.reference?.messageId === sent.id) await x.delete().catch(() => {})
-  }
+  await pinQuietly(sent)
   return sent
+}
+
+/** Pin a message without Discord's "pinned a message" notice; needs Pin Messages. */
+async function pinQuietly(msg: Message) {
+  const pinned = await msg.pin().then(
+    () => true,
+    e => void log('pinning failed (the bot needs Pin Messages):', e?.message ?? e),
+  )
+  if (!pinned) return
+  const after = await msg.channel.messages.fetch({ after: msg.id, limit: 10 }).catch(() => undefined)
+  for (const x of after?.values() ?? []) if (x.type === MessageType.ChannelPinnedMessage && x.reference?.messageId === msg.id) await x.delete().catch(() => {})
 }
 
 /** Nudge once when a meeting has gone quiet; nothing is sent to Claude on its own. */
@@ -2268,6 +2292,252 @@ async function writeMeetingHtml(sessionId: string, mt: Meeting): Promise<string>
   return path
 }
 
+// ---- usage: context, plan limits ---------------------------------------------------
+//
+// ccd sessions run statusline.ts, which keeps the snapshot Claude Code gives
+// status line commands (context window use, plan limits, session totals).
+// Sessions started with plain `claude` only have the context size from the
+// transcript.
+
+const CONTEXT_WARN_PCT = 80
+/** Below this the warning re-arms (after /compact or /clear). */
+const CONTEXT_REARM_PCT = 50
+
+/** The context size after the session's last reply, from the transcript. */
+function noteContext(t: Tracked, o: any) {
+  const u = o?.type === 'assistant' && !o.isSidechain ? o.message?.usage : undefined
+  if (!u) return
+  const used = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+  if (used > 0) t.ctxTokens = used
+}
+
+type Context = { pct?: number; used?: number; size?: number }
+
+function contextOf(t: Tracked): Context | undefined {
+  return readSnapshot(t.sessionId)?.context ?? (t.ctxTokens ? { used: t.ctxTokens } : undefined)
+}
+
+/** "🧠 35%" (rounded down to `step`), or "🧠 351k" when only the token count is known. */
+function contextLabel(c: Context | undefined, step = 1): string {
+  if (c?.pct !== undefined) return `🧠 ${Math.floor(c.pct / step) * step}%`
+  return c?.used ? `🧠 ${tokens(c.used)}` : ''
+}
+
+/** The newest plan limits seen in any session's snapshot (they're account-wide). */
+let planSeen: { at: number; fiveHour?: PlanLimit; sevenDay?: PlanLimit } | undefined
+
+function latestPlan(): { fiveHour?: PlanLimit; sevenDay?: PlanLimit } | undefined {
+  for (const sid of tracked.keys()) {
+    const snap = readSnapshot(sid)
+    if ((snap?.fiveHour || snap?.sevenDay) && (!planSeen || snap.at > planSeen.at)) planSeen = snap
+  }
+  // An old snapshot says little about now.
+  return planSeen && Date.now() - planSeen.at < 7 * 86_400_000 ? planSeen : undefined
+}
+
+const resetIn = (l: PlanLimit) => (l.resetsAt ? ` · ${m.resets(`<t:${Math.floor(l.resetsAt / 1000)}:R>`)}` : '')
+
+/** "Session 40% · resets in 2 hours · Week 15% · …", percentages rounded down to `step`. */
+function planSummary(step = 1): string | undefined {
+  const plan = latestPlan()
+  if (!plan) return undefined
+  const part = (label: string, l?: PlanLimit) => (l ? `${label} ${Math.floor(l.pct / step) * step}%${resetIn(l)}` : '')
+  return [part(m.planSession, plan.fiveHour), part(m.planWeek, plan.sevenDay)].filter(Boolean).join(' · ') || undefined
+}
+
+/** /usage: this session in a session channel, every running session elsewhere; plan limits for owners. */
+function usageReport(channelId: string, owner: boolean): string {
+  const lines = [m.usageTitle]
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === channelId)
+  if (entry) {
+    const [sid, st] = entry
+    const t = tracked.get(sid)
+    const snap = readSnapshot(sid)
+    const ctx = t ? contextOf(t) : snap?.context
+    lines.push('', m.usageSession(st.channelId))
+    if (snap?.model) lines.push(m.usageModel(snap.model))
+    if (ctx?.pct !== undefined && ctx.size) lines.push(m.usageContext(Math.round(ctx.pct), tokens(ctx.used ?? (ctx.pct / 100) * ctx.size), tokens(ctx.size)))
+    else if (ctx?.used) lines.push(m.usageContextTokens(tokens(ctx.used)))
+    if (snap?.totalIn !== undefined || snap?.totalOut !== undefined) lines.push(m.usageTokens(tokens(snap.totalIn ?? 0), tokens(snap.totalOut ?? 0)))
+    if (snap?.durationMs) lines.push(m.usageDuration(formatDuration(snap.durationMs), snap.linesAdded ?? 0, snap.linesRemoved ?? 0))
+    if (!snap) lines.push(m.usageNoSnapshot)
+  } else {
+    const live = [...tracked.values()].filter(t => t.live)
+    lines.push('', m.running)
+    if (!live.length) lines.push(m.none)
+    for (const t of live) {
+      const ctx = contextLabel(contextOf(t))
+      lines.push(`${statusIcon(t.live!.status)} <#${t.st.channelId}>${ctx ? ` · ${ctx}` : ''}`)
+    }
+  }
+  if (owner) {
+    const plan = latestPlan()
+    lines.push('', m.usagePlan)
+    if (!plan) lines.push(m.usageNoPlan)
+    if (plan?.fiveHour) lines.push(`- ${m.planSession} ${Math.round(plan.fiveHour.pct)}%${resetIn(plan.fiveHour)}`)
+    if (plan?.sevenDay) lines.push(`- ${m.planWeek} ${Math.round(plan.sevenDay.pct)}%${resetIn(plan.sevenDay)}`)
+  }
+  return lines.join('\n')
+}
+
+/** Once per filling-up: say the context is getting full and offer a handoff. */
+function warnContext(t: Tracked) {
+  const pct = readSnapshot(t.sessionId)?.context?.pct
+  if (pct === undefined || isPaused(t.st)) return
+  if (pct < CONTEXT_REARM_PCT && t.st.contextWarned) {
+    t.st.contextWarned = false
+    stateDirty = true
+  }
+  if (pct < CONTEXT_WARN_PCT || t.st.contextWarned) return
+  t.st.contextWarned = true
+  stateDirty = true
+  void channelOf(t).then(ch =>
+    ch &&
+    enqueue(ch.id, () =>
+      ch.send({
+        content: m.contextHigh(Math.round(pct)),
+        components: [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`handoff:make:${t.sessionId}`).setLabel(m.makeHandoff).setEmoji('📋').setStyle(ButtonStyle.Primary),
+          ),
+        ],
+        allowedMentions: { parse: [] },
+      }),
+    ),
+  )
+}
+
+// ---- handoff ------------------------------------------------------------------------
+//
+// A read-only copy of the session (as for meetings) writes a handoff document:
+// goal, what's done, current state, decisions, open problems, next steps, key
+// files, how to verify, with the repo's git state given to it. The document is
+// saved to handoffs/<session>/, posted and pinned in the session channel, with
+// buttons to start a new session from it in the same folder or end this one.
+
+const HANDOFFS_DIR = join(STATE_DIR, 'handoffs')
+const handoffsRunning = new Set<string>()
+
+/** Branch, uncommitted changes and recent commits, if the folder is a git repository. */
+async function gitSummary(cwd: string): Promise<string | undefined> {
+  const git = (...args: string[]) =>
+    run('git', args, { cwd, timeout: 10_000, maxBuffer: 1024 * 1024 }).then(
+      r => r.stdout.trim(),
+      () => undefined,
+    )
+  const branch = await git('rev-parse', '--abbrev-ref', 'HEAD')
+  if (branch === undefined) return undefined
+  const status = (await git('status', '--short')) ?? ''
+  const statusLines = status.split('\n').filter(Boolean)
+  const log = (await git('log', '--oneline', '-10')) ?? ''
+  return [
+    `Branch: ${branch}`,
+    `Uncommitted changes (${statusLines.length}):`,
+    statusLines.slice(0, 60).join('\n') || '(none)',
+    statusLines.length > 60 ? `… and ${statusLines.length - 60} more` : '',
+    'Recent commits:',
+    log || '(none)',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+const handoffName = (ts: number) => {
+  const d = new Date(ts).toLocaleString('sv-SE').replace(/\D/g, '')
+  return `handoff-${d.slice(0, 8)}-${d.slice(8, 14)}.md`
+}
+
+async function makeHandoff(r: Replier, channelId: string, note: string | undefined) {
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === channelId)
+  if (!entry) return void (await r.reply(m.notSessionChannel))
+  const [sid, st] = entry
+  if (!st.transcript) return void (await r.reply(m.handoffNothing))
+  if (handoffsRunning.has(sid)) return void (await r.reply(m.handoffAlready))
+  handoffsRunning.add(sid)
+  try {
+    const status = await r.reply(m.handoffWorking)
+    const git = await gitSummary(st.cwd)
+    const prompt = [
+      'Write a handoff document so that a new Claude Code session, which will not see this conversation, can pick up this work where it stands.',
+      'You are a read-only copy of the session: do not change anything; you may read files to check details.',
+      "Write it in the language the user has mostly used in this session. Be concrete: file paths, commands, names, numbers. Leave out secrets such as tokens and passwords.",
+      'Use these sections, as Markdown headings:',
+      '1. Goal: what the user wants overall, and any constraints or preferences they stated.',
+      '2. Done: what has been completed (with commits if any).',
+      '3. Current state: what is in progress, what works, what is broken or untested.',
+      '4. Decisions: choices made and why, including approaches that were rejected.',
+      '5. Open questions and problems.',
+      '6. Next steps: an ordered, actionable list.',
+      '7. Key files and where things are.',
+      '8. How to verify: commands to build, test or run.',
+      'Output only the document, starting with a "# " title line.',
+      git ? `\nThe repository's state right now:\n${git}` : '',
+      note ? `\nThe user's note for this handoff: ${note}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+    const t = tracked.get(sid) ?? { sessionId: sid, st, ctx: { toolNames: new Map(), showToolCalls: true }, lastTyping: 0 }
+    const res = await runCopy(t, prompt)
+    if (res.error || !res.text?.trim()) return void (await status.edit(m.handoffFailed(clip(res.error ?? 'empty answer', 1500))))
+    const doc = res.text.trim()
+    const now = Date.now()
+    const file = join(HANDOFFS_DIR, sid, handoffName(now))
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, doc + '\n')
+    const ch = guild.channels.cache.get(st.channelId)
+    if (ch?.type !== ChannelType.GuildText) return void (await status.edit(m.handoffSaved(file)))
+    const title = doc.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? st.title ?? basename(st.cwd)
+    const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`handoff:new:${sid}:${now}`).setLabel(m.handoffNew).setEmoji('▶️').setStyle(ButtonStyle.Success),
+    )
+    if (tracked.get(sid)?.live) buttons.addComponents(new ButtonBuilder().setCustomId(`handoff:end:${sid}`).setLabel(m.handoffEnd).setEmoji('⏹️').setStyle(ButtonStyle.Secondary))
+    const sent = await enqueue(ch.id, () =>
+      ch.send({
+        content: m.handoffPosted(clip(title, 200), file),
+        files: [new AttachmentBuilder(file, { name: handoffName(now) })],
+        components: [buttons],
+        allowedMentions: { parse: [] },
+      }),
+    )
+    await pinQuietly(sent)
+    await status.edit(m.handoffDone(sent.url)).catch(() => {})
+  } finally {
+    handoffsRunning.delete(sid)
+  }
+}
+
+async function handleHandoffButton(i: ButtonInteraction) {
+  const [, action, sid, ts] = i.customId.split(':')
+  const st = state.sessions[sid]
+  if (action === 'make') {
+    if (!st || !can(i.user.id, st, 'chat')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+    await i.deferReply()
+    await makeHandoff(interactionReplier(i), st.channelId, undefined)
+    return
+  }
+  // Starting and ending sessions is for owners, as with /new and /end.
+  if (!isOwner(i.user.id)) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+  if (!st) return void (await i.reply({ content: m.sessionNotFound, ephemeral: true }))
+  await i.deferReply()
+  const r = interactionReplier(i)
+  if (action === 'end') {
+    const t = tracked.get(sid)
+    if (!t?.live) return void (await r.reply(m.alreadyEnded))
+    await endSession(t, r, peers.get(t.live.pid))
+    return
+  }
+  if (action === 'new') {
+    const file = join(HANDOFFS_DIR, sid, handoffName(Number(ts)))
+    if (!statSync(file, { throwIfNoEntry: false })) return void (await r.reply(m.handoffMissing(file)))
+    if (!statSync(st.cwd, { throwIfNoEntry: false })?.isDirectory()) return void (await r.reply(m.folderNotFound(st.cwd)))
+    const next = await launchSession(r, st.cwd, [m.handoffPrompt(file)])
+    if (!next) return
+    await post(next, [m.handoffFrom(st.channelId)])
+    const old = guild.channels.cache.get(st.channelId)
+    if (old?.type === ChannelType.GuildText) await old.send({ content: m.handoffTo(next.st.channelId), allowedMentions: { parse: [] } }).catch(() => {})
+  }
+}
+
 // ---- pausing --------------------------------------------------------------------
 
 async function setSessionPaused(t: Tracked, paused: boolean, by: string) {
@@ -2310,11 +2580,17 @@ async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode', 'rename'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode', 'rename', 'handoff', 'usage'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
-  const need: Need = i.commandName === 'members' ? 'view' : i.commandName === 'rename' ? 'chat' : 'owner'
+  if (i.commandName === 'usage') {
+    // Only the asker sees it; plan usage is the owner's account, so others only get the session's numbers.
+    if (!isOwner(i.user.id) && !can(i.user.id, st, 'view')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+    await i.reply({ content: clip(usageReport(i.channelId, isOwner(i.user.id)), 2000), ephemeral: true, allowedMentions: { parse: [] } })
+    return
+  }
+  const need: Need = i.commandName === 'members' ? 'view' : i.commandName === 'rename' || i.commandName === 'handoff' ? 'chat' : 'owner'
   if (!can(i.user.id, st, need) && !(i.commandName === 'sync' && isOwner(i.user.id))) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
     return
@@ -2330,6 +2606,7 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
   if (i.commandName === 'mode') return setMode(r, i.channelId, i.options.getString('mode', true) as Mode)
   if (i.commandName === 'model') return setModel(r, i.channelId, i.options.getString('name', true).trim())
   if (i.commandName === 'rename') return renameSession(r, i.channelId, i.options.getString('name', true).trim())
+  if (i.commandName === 'handoff') return makeHandoff(r, i.channelId, i.options.getString('note')?.trim() || undefined)
   const user = i.options.getUser('user', true)
   if (user.bot) return void (await r.reply(m.cantShareWithBot))
   await share(r, i.channelId, user.id, i.commandName === 'share' ? (i.options.getString('role', true) as Role) : undefined)

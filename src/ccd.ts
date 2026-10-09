@@ -7,9 +7,10 @@
  *                                      (the source checkout's bin/ccd uses this, then execs
  *                                      claude itself so Claude Code keeps the shell's PID)
  */
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { STATE_DIR } from './config'
+import { CLAUDE_DIR, STATE_DIR } from './config'
+import { USER_STATUSLINE_FILE } from './statusline'
 import { IS_WIN } from './platform'
 import { selfCommand } from './self'
 
@@ -22,15 +23,29 @@ const hook = (sub: string) => selfCommand(sub).map(q).join(' ')
 /** Questions and plans wait this long on Discord before falling back to the terminal. */
 const askTimeout = Number(process.env.DISCORD_SYNC_ASK_TIMEOUT) || 600
 
+/** The user's own status line from ~/.claude/settings.json, which ours runs after saving Claude Code's snapshot. */
+function userStatusLine(): { command?: string; padding?: number } {
+  try {
+    const sl = JSON.parse(readFileSync(join(CLAUDE_DIR, 'settings.json'), 'utf8')).statusLine
+    return sl?.type === 'command' && typeof sl.command === 'string' ? { command: sl.command, padding: sl.padding } : {}
+  } catch {
+    return {}
+  }
+}
+
 function writeConfig(): string {
   const dir = join(STATE_DIR, 'ccd')
   mkdirSync(dir, { recursive: true })
+  const user = userStatusLine()
+  writeFileSync(USER_STATUSLINE_FILE, user.command ?? '')
   const [command, ...args] = selfCommand('channel').map(slash)
   writeFileSync(join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { 'discord-sync': { command, args } } }, null, 2))
   writeFileSync(
     join(dir, 'settings.json'),
     JSON.stringify(
       {
+        // Our status line keeps Claude Code's usage snapshot for the daemon, then shows the user's own.
+        statusLine: { type: 'command', command: hook('statusline'), ...(user.padding !== undefined ? { padding: user.padding } : {}) },
         hooks: {
           PreToolUse: [
             {

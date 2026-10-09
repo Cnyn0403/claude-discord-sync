@@ -117,6 +117,8 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/stop` | session channel | Interrupt the current turn (presses Esc) |
 | `/end` | session channel | Interrupt if busy, then `/exit` |
 | `/resume` | ended channel | `ccd --resume <id>` in tmux; the channel moves back from the archive |
+| `/usage` | anywhere | Only you see it. In a session channel: its model, context use, tokens and running time; elsewhere: every running session's context use. Owners also get the plan's session and weekly usage |
+| `/handoff [note]` | session channel | Write a handoff document (see [Handoff](#handoff)) |
 | `/rename <name>` | session channel | Name the session. Channels are named `project・title` from Claude Code's generated title anyway; a name given here (or with Claude Code's own `/rename`) takes precedence, and is also sent to Claude Code when the session is idle in tmux, so `claude --resume` shows it |
 | `/share @user <role>` | session channel | Give someone access to this session (see [Sharing](#sharing)) |
 | `/unshare @user` | session channel | Remove their access |
@@ -154,6 +156,26 @@ To talk things over with the people you shared a session with, without clutterin
 **Records.** Every message is written to disk as it is said, in `~/.claude/channels/discord-sync/meetings/<session-id>/<thread-id>.jsonl` (plus a `.md` copy that is what Claude gets), so a meeting is kept even if the thread is deleted or never ended. When a meeting closes, the session channel gets a **"Meeting recorded"** message, pinned, with the meeting as **one self-contained HTML page**: laid out like Discord with avatars, names and times, Markdown (code blocks and tables included) and images inline, all embedded so it opens offline in any browser. The channel's pins thus list every meeting the session had. A meeting still open when the session ends is saved and recorded, not sent to Claude. Pinning needs the **Pin Messages** permission; without it the record is posted unpinned.
 
 Only people who can see the session channel can join (use `/share`). The bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own. A message mentioning both a person and the bot is a normal message to Claude, not a meeting.
+
+## Usage
+
+`ccd` sessions run a small status line (`claude-discord-sync statusline`) that keeps the snapshot Claude Code hands status line commands: context window use, the plan's session and weekly limits, running totals. If you have your own status line in `~/.claude/settings.json`, it still runs with the same input, so the terminal looks the same. Sessions started with plain `claude` only have their context size, from the transcript.
+
+- **Console:** the plan's usage at the top (`📊 Session 40% · resets in 2 hours · Week 15% · …`) and each running session's context use (`🧠 35%`), in steps of 5%.
+- **Live status message:** the context use, next to what Claude is doing.
+- **`/usage`:** details, only for you (see [Commands](#commands)).
+- **Context warning:** when a session's context passes 80%, its channel says so once, with a *Make a handoff* button. It re-arms after the context drops below 50% (`/compact`, `/clear`).
+
+No costs are shown: on a subscription they aren't what you pay.
+
+## Handoff
+
+`/handoff [note]` (or `!handoff`, or the button on the context warning) has a read-only copy of the session, as in meetings, write a handoff document for a session that won't see the conversation: goal, what's done, current state, decisions and why, open problems, next steps, key files, how to verify. The repository's branch, uncommitted changes and recent commits are given to it. It doesn't interrupt the session, even while Claude is working.
+
+The document is saved in `~/.claude/channels/discord-sync/handoffs/<session-id>/` and posted, pinned, in the session channel with two buttons:
+
+- **New session from this handoff:** starts `ccd` in the same folder, asked to read the document and continue from its next steps. The two channels link to each other.
+- **End this session:** like `/end`. Nothing ends on its own.
 
 ## Pausing
 

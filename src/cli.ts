@@ -5,7 +5,7 @@
  *   claude-discord-sync setup | update | uninstall | doctor | daemon [--log <file>] | ccd [claude args…]
  *
  * Internal subcommands (started by Claude Code or the daemon):
- *   channel, ask-hook, stop-hook, win-console
+ *   channel, ask-hook, stop-hook, statusline, win-console
  */
 import { appendFileSync } from 'fs'
 import { format } from 'util'
@@ -23,6 +23,7 @@ const COMMANDS: Record<string, () => Promise<unknown>> = {
   channel: () => import('./channel-server'),
   'ask-hook': () => import('./ask-hook'),
   'stop-hook': () => import('./stop-hook'),
+  statusline: () => import('./statusline').then(s => s.run()),
   'win-console': () => import('./win-console'),
 }
 
