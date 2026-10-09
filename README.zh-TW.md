@@ -150,7 +150,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 2. **問 Claude：**在討論串裡 tag bot 並寫上問題，會由一個唯讀的 session 分身回答。它知道到目前為止的對話，也能讀檔案（Read、Grep、Glob），但不能修改任何東西，問答也不會進到原本的 session。背後是每個問題都在背景開一個一次性的 `claude -p --resume <session> --fork-session --no-session-persistence`，並把目前為止的討論交給它：它永遠看得到 session 的最新狀態，不會在 `claude --resume` 清單留下多餘的 session，每個問題都會像一般請求一樣計費。
 3. **結束：**`@bot end`，後面可以接結論（「@bot end 就用方案 A」）。討論串會被關閉，Claude 會收到整段討論的 Markdown 檔（誰說了什麼、各自的角色、分身的回答，附件會下載到本機），加上結論。沒寫結論的話，Claude 會整理討論內容並提出下一步建議。`@bot save`（可以接結論）則是關閉討論串、只保存紀錄，不交給 Claude。
 
-**會議紀錄：**每則訊息都會即時寫進 `~/.claude/channels/discord-sync/meetings/<session-id>/<討論串-id>.md`（給人看的紀錄）和 `.jsonl`（重播用），所以就算討論串被刪掉、或會議沒有正式結束，紀錄都還在。session 結束、歸檔到論壇時，它的會議會重播進論壇貼文：先是一則附上 `.md` 的標題，接著每則訊息用發言者的名稱和頭像、標上原本的時間重新貼出，最後是結論。用發言者名稱重播需要 **Manage Webhooks（管理 Webhook）** 權限；沒有的話會由 bot 代貼，名字用粗體標示。session 結束時還沒結束的會議只會保存，不會交給 Claude。
+**會議紀錄：**每則訊息都會即時寫進 `~/.claude/channels/discord-sync/meetings/<session-id>/<討論串-id>.jsonl`（另外有一份 `.md`，交給 Claude 的就是它），所以就算討論串被刪掉、或會議沒有正式結束，紀錄都還在。會議結束時，會整理成**一個獨立的 HTML 網頁**，排版像 Discord：有頭像、名稱、時間，Markdown（含程式碼區塊和表格）和圖片都正確顯示，所有內容都包在檔案裡，不需要網路就能用瀏覽器打開。這個網頁會附在討論串的結束訊息上；session 結束、歸檔到論壇時，每場會議也會在論壇貼文裡各發一則訊息並附上網頁（討論串本身會跟著被刪掉的頻道一起消失）。session 結束時還沒結束的會議只會保存，不會交給 Claude。
 
 只有看得到 session 頻道的人才能加入（用 `/share` 分享）。會議 30 分鐘沒人說話時，bot 會提醒一次；它不會自己把會議交給 Claude。同時 tag 人和 bot 的訊息會當成一般訊息交給 Claude，不會開會議。
 

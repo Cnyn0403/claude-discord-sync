@@ -187,7 +187,7 @@ const en = {
 
   // meetings
   meetingStarted: (bot: string) =>
-    `🗣️ **Meeting thread.** Talk it over here; nothing reaches the session until you finish. Everything is recorded and kept with the session's archive.\n` +
+    `🗣️ **Meeting thread.** Talk it over here; nothing reaches the session until you finish. Everything is recorded; when it's over you get the whole meeting as an HTML page.\n` +
     `- ${bot} + a question: a read-only copy of Claude that knows the session as it is now answers (it can read files but not change anything).\n` +
     `- ${bot} \`end\` + the conclusion (optional): closes the thread and hands the whole discussion to Claude.\n` +
     `- ${bot} \`save\` + the conclusion (optional): closes the thread and only keeps the record; Claude isn't told.`,
@@ -204,10 +204,17 @@ const en = {
   meetingSavedNoPeer: (n: number) => `💾 The session can't take messages right now (read-only or paused), so the meeting (${n} messages) was saved but not sent to Claude. This thread is now closed.`,
   meetingIdle: (bot: string) => `🗣️ The meeting has been quiet for 30 minutes. \`${bot} end\` + the conclusion hands it to Claude; \`${bot} save\` just keeps the record.`,
   meetingClaudeName: 'Claude (read-only copy)',
-  meetingReplayFilesFailed: (n: number) => `(${n} attachment(s) too large to repost; see the local record)`,
-  meetingReplayHeader: (name: string, when: string, n: number) => `## ${name}\n-# Meeting · ${when} · ${n} messages · full record attached`,
-  meetingReplayFooter: (conclusion: string | undefined, handedOff: boolean) =>
-    `${handedOff ? '📨 **Meeting over, sent to Claude.**' : '💾 **Meeting over, saved.**'}${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
+  meetingArchived: (name: string, when: string, n: number, status: string) => `🗣️ **${name}**\n-# Meeting · ${when} · ${n} messages · ${status} · download the HTML file to read it`,
+  htmlMeeting: 'Meeting',
+  htmlConclusion: 'Conclusion',
+  htmlNoConclusion: 'No conclusion given',
+  htmlSentToClaude: 'Sent to Claude',
+  htmlSavedOnly: 'Saved, not sent to Claude',
+  htmlStillOpen: 'In progress',
+  htmlMessages: (n: number) => `${n} messages`,
+  htmlClaudeNote: 'read-only copy',
+  htmlFileNotEmbedded: (name: string, path?: string) => (path ? `${name} (not embedded; saved at ${path})` : `${name} (not downloaded)`),
+  htmlGenerated: 'Meeting record from claude-discord-sync',
   meetingLastPrompt: '(meeting notes)',
 } as const
 
@@ -382,7 +389,7 @@ const zhTW: Messages = {
   resumeAll: '全部恢復',
 
   meetingStarted: bot =>
-    `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。所有內容都會被記錄，跟著 session 一起歸檔。\n` +
+    `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。所有內容都會被記錄，結束後會整理成一個 HTML 檔。\n` +
     `- ${bot} 加上問題：由一個唯讀的 Claude 分身回答，它知道 session 目前為止的內容（可以讀檔案，但不能修改任何東西）。\n` +
     `- ${bot} \`end\` 加上結論（選填）：關閉討論串，把整段討論交給 Claude。\n` +
     `- ${bot} \`save\` 加上結論（選填）：關閉討論串，只保存紀錄，不交給 Claude。`,
@@ -399,10 +406,17 @@ const zhTW: Messages = {
   meetingSavedNoPeer: n => `💾 這個 session 目前無法接收訊息（唯讀或已暫停），所以會議（${n} 則訊息）只保存了紀錄，沒有交給 Claude。這個討論串已關閉。`,
   meetingIdle: bot => `🗣️ 會議已經 30 分鐘沒有人說話了。用 \`${bot} end\` 加上結論會交給 Claude；用 \`${bot} save\` 只保存紀錄。`,
   meetingClaudeName: 'Claude（唯讀分身）',
-  meetingReplayFilesFailed: n => `（${n} 個附件太大無法重貼，請見本機紀錄）`,
-  meetingReplayHeader: (name, when, n) => `## ${name}\n-# 會議 · ${when} · ${n} 則訊息 · 完整紀錄見附件`,
-  meetingReplayFooter: (conclusion, handedOff) =>
-    `${handedOff ? '📨 **會議結束，已交給 Claude。**' : '💾 **會議結束，已保存。**'}${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
+  meetingArchived: (name, when, n, status) => `🗣️ **${name}**\n-# 會議 · ${when} · ${n} 則訊息 · ${status} · 下載 HTML 檔即可閱讀`,
+  htmlMeeting: '會議',
+  htmlConclusion: '結論',
+  htmlNoConclusion: '沒有寫結論',
+  htmlSentToClaude: '已交給 Claude',
+  htmlSavedOnly: '只保存，沒有交給 Claude',
+  htmlStillOpen: '進行中',
+  htmlMessages: n => `${n} 則訊息`,
+  htmlClaudeNote: '唯讀分身',
+  htmlFileNotEmbedded: (name, path) => (path ? `${name}（沒有內嵌，存在 ${path}）` : `${name}（沒有下載到）`),
+  htmlGenerated: 'claude-discord-sync 會議紀錄',
   meetingLastPrompt: '（會議記錄）',
 }
 

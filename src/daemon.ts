@@ -22,7 +22,6 @@ import {
   type Guild,
   type TextChannel,
   type ForumChannel,
-  type Webhook,
   type AnyThreadChannel,
   type Message,
   type Interaction,
@@ -48,6 +47,7 @@ import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } fr
 import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
+import { meetingHtml, type HtmlLabels } from './meeting-html'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
 import { daemonRunning } from './autostart'
@@ -93,6 +93,8 @@ type SessionState = {
 type Meeting = {
   threadId: string
   name?: string
+  /** The session channel's name when the meeting started. */
+  channel?: string
   startedAt: number
   lastAt: number
   reminded?: boolean
@@ -100,7 +102,7 @@ type Meeting = {
   conclusion?: string
   /** Sent to the session when it ended. */
   handedOff?: boolean
-  /** Already copied into the session's forum post. */
+  /** Already posted in the session's forum post. */
   replayed?: boolean
 }
 
@@ -2014,10 +2016,10 @@ function roleTag(userId: string, st: SessionState): string {
 // with only Read, Grep and Glob). "@bot end" closes the thread and hands the
 // discussion to the session; "@bot save" closes it without doing so.
 //
-// Every message is written to disk as it happens (meetings/<session>/<id>.md
-// for people and Claude, .jsonl to replay it), so a meeting survives its thread:
-// when the session is archived to the forum and its channel deleted, the
-// meetings are replayed into the forum post.
+// Every message is written to disk as it happens (meetings/<session>/<id>.jsonl,
+// plus .md for Claude), so a meeting survives its thread. When it closes it is
+// rendered as one self-contained HTML page (meeting-html.ts), posted in the
+// thread and, when the session is archived to the forum, in the forum post.
 
 const MEETINGS_DIR = join(STATE_DIR, 'meetings')
 const MEETING_IDLE_MS = 30 * 60_000
@@ -2037,7 +2039,7 @@ type MeetingEntry = {
   files?: { name: string; path?: string; url: string }[]
 }
 
-const meetingFile = (sessionId: string, mt: Meeting, ext: 'md' | 'jsonl') => join(MEETINGS_DIR, sessionId, `${mt.threadId}.${ext}`)
+const meetingFile = (sessionId: string, mt: Meeting, ext: 'md' | 'jsonl' | 'html') => join(MEETINGS_DIR, sessionId, `${mt.threadId}.${ext}`)
 
 function meetingByThread(threadId: string): Tracked | undefined {
   for (const t of tracked.values()) if (t.st.meeting?.threadId === threadId) return t
@@ -2109,7 +2111,7 @@ async function startMeeting(t: Tracked, msg: Message, people: import('discord.js
   const topic = cleanContent(msg.content, msg.channel as TextChannel).replace(/@\S+/g, '').replace(/\s+/g, ' ').trim()
   const name = clip(`🗣️ ${topic || m.meetingThreadName(new Date().toISOString().slice(11, 16))}`, 100)
   const thread = await msg.startThread({ name, autoArchiveDuration: ThreadAutoArchiveDuration.OneDay })
-  const mt: Meeting = { threadId: thread.id, name, startedAt: Date.now(), lastAt: Date.now() }
+  const mt: Meeting = { threadId: thread.id, name, channel: (msg.channel as TextChannel).name, startedAt: Date.now(), lastAt: Date.now() }
   t.st.meeting = mt
   stateDirty = true
   mkdirSync(join(MEETINGS_DIR, t.sessionId), { recursive: true })
@@ -2265,6 +2267,7 @@ async function closeMeeting(t: Tracked, opts: { by?: Message; conclusion?: strin
     ].join('\n'),
   )
   ;(t.st.meetings ??= []).push(mt)
+  const html = await writeMeetingHtml(t.sessionId, mt).catch(e => void log('meeting html failed:', e?.message ?? e))
 
   if (handoff) {
     const by = opts.by!
@@ -2291,7 +2294,10 @@ async function closeMeeting(t: Tracked, opts: { by?: Message; conclusion?: strin
   }
   const th = opts.by.channel as AnyThreadChannel
   const reply = handoff ? m.meetingEnded(entries.length) : opts.handoff ? m.meetingSavedNoPeer(entries.length) : m.meetingSaved(entries.length)
-  await opts.by.reply({ content: reply, allowedMentions: { parse: [] } }).catch(() => {})
+  const files = html ? [new AttachmentBuilder(html, { name: meetingHtmlName(mt) })] : []
+  await opts.by
+    .reply({ content: reply, files, allowedMentions: { parse: [] } })
+    .catch(() => opts.by!.reply({ content: reply, allowedMentions: { parse: [] } }).catch(() => {}))
   await post(t, [handoff ? m.meetingEndedChannel(th.id, mt.conclusion ? clip(mt.conclusion, 1500) : undefined) : m.meetingSavedChannel(th.id)])
   await th.setLocked(true).catch(() => {})
   await th.setArchived(true).catch(() => {})
@@ -2306,53 +2312,54 @@ function remindIdleMeeting(t: Tracked) {
   void meetingThread(mt).then(th => th?.send({ content: m.meetingIdle(`<@${client.user!.id}>`), allowedMentions: { parse: [] } }).catch(() => {}))
 }
 
-/** Our webhook in the archive forum, to replay meetings under each speaker's name; undefined without Manage Webhooks. */
-async function archiveWebhook(forum: ForumChannel): Promise<Webhook | undefined> {
-  try {
-    const hooks = await forum.fetchWebhooks()
-    return hooks.find(h => h.owner?.id === client.user!.id && h.name === 'discord-sync') ?? (await forum.createWebhook({ name: 'discord-sync' }))
-  } catch (e: any) {
-    log('no webhook in the archive forum (needs Manage Webhooks); replaying meetings as the bot:', e?.message ?? e)
-    return undefined
-  }
+const htmlLabels = (): HtmlLabels => ({
+  lang: cfg.language,
+  meeting: m.htmlMeeting,
+  conclusion: m.htmlConclusion,
+  noConclusion: m.htmlNoConclusion,
+  sentToClaude: m.htmlSentToClaude,
+  savedOnly: m.htmlSavedOnly,
+  stillOpen: m.htmlStillOpen,
+  messages: m.htmlMessages,
+  claudeName: 'Claude',
+  claudeNote: m.htmlClaudeNote,
+  role: r => (r === 'owner' ? m.roleOwner : r === 'collaborator (full)' ? m.roleFull : r === 'collaborator' ? m.roleCollab : r === 'viewer' ? m.roleViewer : r),
+  fileNotEmbedded: m.htmlFileNotEmbedded,
+  generated: m.htmlGenerated,
+})
+
+/** meeting-20261009-1507.html, in this computer's time zone. */
+function meetingHtmlName(mt: Meeting): string {
+  const d = new Date(mt.startedAt).toLocaleString('sv-SE').replace(/\D/g, '')
+  return `meeting-${d.slice(0, 8)}-${d.slice(8, 12)}.html`
 }
 
-/** Webhook display names can't contain "discord" or "clyde". */
-const webhookName = (s: string) => clip(s.replace(/discord/gi, 'disc0rd').replace(/clyde/gi, 'clyd3'), 80)
+/** Render the meeting's record to meetings/<session>/<thread>.html; returns the path. */
+async function writeMeetingHtml(sessionId: string, mt: Meeting): Promise<string> {
+  const entries = readMeetingEntries(sessionId, mt)
+  const html = await meetingHtml(
+    { title: mt.name ?? m.meetingThreadName(new Date(mt.startedAt).toISOString().slice(11, 16)), channel: mt.channel, sessionId, startedAt: mt.startedAt, endedAt: mt.endedAt, conclusion: mt.conclusion, handedOff: mt.handedOff },
+    entries,
+    htmlLabels(),
+  )
+  const path = meetingFile(sessionId, mt, 'html')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, html)
+  return path
+}
 
-/** Replay the session's finished meetings into its forum post: a header with the .md, every message, the conclusion. */
+/** Post each finished meeting into the session's forum post: one message with the HTML page attached. */
 async function replayMeetings(sessionId: string, st: SessionState, postThread: AnyThreadChannel) {
-  const pending = (st.meetings ?? []).filter(mt => !mt.replayed)
-  if (!pending.length) return
-  const forum = postThread.parent?.type === ChannelType.GuildForum ? postThread.parent : undefined
-  const hook = forum ? await archiveWebhook(forum) : undefined
-  const localTime = (ts: number) => new Date(ts).toLocaleString('sv-SE', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-  for (const mt of pending) {
-    const entries = readMeetingEntries(sessionId, mt)
-    const md = meetingFile(sessionId, mt, 'md')
-    const when = `<t:${Math.floor(mt.startedAt / 1000)}:f>`
+  for (const mt of (st.meetings ?? []).filter(x => !x.replayed)) {
+    let html = meetingFile(sessionId, mt, 'html')
+    if (!statSync(html, { throwIfNoEntry: false })) html = await writeMeetingHtml(sessionId, mt)
+    const n = readMeetingEntries(sessionId, mt).length
+    const status = mt.handedOff ? m.htmlSentToClaude : m.htmlSavedOnly
     await postThread.send({
-      content: m.meetingReplayHeader(mt.name ?? 'meeting', when, entries.length),
-      files: statSync(md, { throwIfNoEntry: false }) ? [new AttachmentBuilder(md, { name: 'meeting.md' })] : [],
+      content: m.meetingArchived(mt.name ?? 'meeting', `<t:${Math.floor(mt.startedAt / 1000)}:f>`, n, status),
+      files: [new AttachmentBuilder(html, { name: meetingHtmlName(mt) })],
       allowedMentions: { parse: [] },
     })
-    for (const e of entries) {
-      const files = (e.files ?? []).filter(f => f.path && statSync(f.path, { throwIfNoEntry: false })).map(f => new AttachmentBuilder(f.path!, { name: f.name }))
-      const name = `${e.role === 'claude' ? m.meetingClaudeName : e.name} · ${localTime(e.ts)}`
-      const parts = e.text ? chunk(e.text) : ['']
-      for (const [i, part] of parts.entries()) {
-        const send = (withFiles: boolean, note = '') => {
-          const content = (part + note).trim() || undefined
-          const extra = withFiles && i === 0 && files.length ? { files } : {}
-          return hook
-            ? hook.send({ threadId: postThread.id, username: webhookName(name), avatarURL: e.avatar, content, allowedMentions: { parse: [] }, ...extra })
-            : postThread.send({ content: clip(`**${name}**\n${content ?? ''}`, 2000), allowedMentions: { parse: [] }, ...extra })
-        }
-        // An attachment over the server's upload limit shouldn't sink the rest of the replay.
-        await send(true).catch(() => send(false, i === 0 && files.length ? `\n-# ${m.meetingReplayFilesFailed(files.length)}` : ''))
-      }
-    }
-    await postThread.send({ content: m.meetingReplayFooter(mt.conclusion ? clip(mt.conclusion, 1500) : undefined, !!mt.handedOff), allowedMentions: { parse: [] } })
     mt.replayed = true
     stateDirty = true
   }
