@@ -187,18 +187,27 @@ const en = {
 
   // meetings
   meetingStarted: (bot: string) =>
-    `🗣️ **Meeting thread.** Talk it over here; nothing reaches the session until you finish.\n` +
-    `- ${bot} + a question: a read-only copy of Claude that knows the session so far answers (it can read files but not change anything).\n` +
-    `- ${bot} \`end\` + the conclusion (optional): closes the thread and hands the whole discussion to Claude.`,
+    `🗣️ **Meeting thread.** Talk it over here; nothing reaches the session until you finish. Everything is recorded and kept with the session's archive.\n` +
+    `- ${bot} + a question: a read-only copy of Claude that knows the session as it is now answers (it can read files but not change anything).\n` +
+    `- ${bot} \`end\` + the conclusion (optional): closes the thread and hands the whole discussion to Claude.\n` +
+    `- ${bot} \`save\` + the conclusion (optional): closes the thread and only keeps the record; Claude isn't told.`,
   meetingAlready: (threadId: string) => `🗣️ A meeting is already open: <#${threadId}>`,
   meetingThreadName: (time: string) => `Meeting ${time}`,
-  meetingAskHint: (bot: string) => `Ask a question after ${bot}, or \`${bot} end\` to finish the meeting.`,
+  meetingAskHint: (bot: string) => `Ask a question after ${bot}, \`${bot} end\` to hand the meeting to Claude, or \`${bot} save\` to just keep the record.`,
   meetingAskFailed: (error: string) => `⚠️ The read-only copy couldn't answer: ${error}`,
   meetingEndedChannel: (threadId: string, conclusion?: string) =>
     `📨 Meeting <#${threadId}> is over; the discussion went to Claude.${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
+  meetingSavedChannel: (threadId: string) => `💾 Meeting <#${threadId}> is over and saved (not sent to Claude).`,
   meetingNoAccess: (names: string) => `⚠️ ${names} can't see this channel; use \`/share\` to let them in.`,
   meetingEnded: (n: number) => `📨 Meeting over: sent the discussion (${n} messages) to Claude. This thread is now closed.`,
-  meetingIdle: (bot: string) => `🗣️ The meeting has been quiet for 30 minutes. \`${bot} end\` + the conclusion hands it to Claude.`,
+  meetingSaved: (n: number) => `💾 Meeting over: the record (${n} messages) is saved and Claude wasn't told. This thread is now closed.`,
+  meetingSavedNoPeer: (n: number) => `💾 The session can't take messages right now (read-only or paused), so the meeting (${n} messages) was saved but not sent to Claude. This thread is now closed.`,
+  meetingIdle: (bot: string) => `🗣️ The meeting has been quiet for 30 minutes. \`${bot} end\` + the conclusion hands it to Claude; \`${bot} save\` just keeps the record.`,
+  meetingClaudeName: 'Claude (read-only copy)',
+  meetingReplayFilesFailed: (n: number) => `(${n} attachment(s) too large to repost; see the local record)`,
+  meetingReplayHeader: (name: string, when: string, n: number) => `## ${name}\n-# Meeting · ${when} · ${n} messages · full record attached`,
+  meetingReplayFooter: (conclusion: string | undefined, handedOff: boolean) =>
+    `${handedOff ? '📨 **Meeting over, sent to Claude.**' : '💾 **Meeting over, saved.**'}${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
   meetingLastPrompt: '(meeting notes)',
 } as const
 
@@ -373,18 +382,27 @@ const zhTW: Messages = {
   resumeAll: '全部恢復',
 
   meetingStarted: bot =>
-    `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。\n` +
-    `- ${bot} 加上問題：由一個唯讀的 Claude 分身回答，它知道 session 到目前為止的內容（可以讀檔案，但不能修改任何東西）。\n` +
-    `- ${bot} \`end\` 加上結論（選填）：關閉討論串，把整段討論交給 Claude。`,
+    `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。所有內容都會被記錄，跟著 session 一起歸檔。\n` +
+    `- ${bot} 加上問題：由一個唯讀的 Claude 分身回答，它知道 session 目前為止的內容（可以讀檔案，但不能修改任何東西）。\n` +
+    `- ${bot} \`end\` 加上結論（選填）：關閉討論串，把整段討論交給 Claude。\n` +
+    `- ${bot} \`save\` 加上結論（選填）：關閉討論串，只保存紀錄，不交給 Claude。`,
   meetingAlready: threadId => `🗣️ 已經有一個進行中的會議：<#${threadId}>`,
   meetingThreadName: time => `會議 ${time}`,
-  meetingAskHint: bot => `在 ${bot} 後面寫上問題，或用 \`${bot} end\` 結束會議。`,
+  meetingAskHint: bot => `在 ${bot} 後面寫上問題；用 \`${bot} end\` 把會議交給 Claude，或用 \`${bot} save\` 只保存紀錄。`,
   meetingAskFailed: error => `⚠️ 唯讀分身無法回答：${error}`,
   meetingEndedChannel: (threadId, conclusion) =>
     `📨 會議 <#${threadId}> 結束了，討論內容已交給 Claude。${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
+  meetingSavedChannel: threadId => `💾 會議 <#${threadId}> 結束了，紀錄已保存（沒有交給 Claude）。`,
   meetingNoAccess: names => `⚠️ ${names} 看不到這個頻道，可以用 \`/share\` 分享給他。`,
   meetingEnded: n => `📨 會議結束：已把討論內容（${n} 則訊息）交給 Claude，這個討論串已關閉。`,
-  meetingIdle: bot => `🗣️ 會議已經 30 分鐘沒有人說話了。用 \`${bot} end\` 加上結論，就會交給 Claude。`,
+  meetingSaved: n => `💾 會議結束：紀錄（${n} 則訊息）已保存，沒有交給 Claude。這個討論串已關閉。`,
+  meetingSavedNoPeer: n => `💾 這個 session 目前無法接收訊息（唯讀或已暫停），所以會議（${n} 則訊息）只保存了紀錄，沒有交給 Claude。這個討論串已關閉。`,
+  meetingIdle: bot => `🗣️ 會議已經 30 分鐘沒有人說話了。用 \`${bot} end\` 加上結論會交給 Claude；用 \`${bot} save\` 只保存紀錄。`,
+  meetingClaudeName: 'Claude（唯讀分身）',
+  meetingReplayFilesFailed: n => `（${n} 個附件太大無法重貼，請見本機紀錄）`,
+  meetingReplayHeader: (name, when, n) => `## ${name}\n-# 會議 · ${when} · ${n} 則訊息 · 完整紀錄見附件`,
+  meetingReplayFooter: (conclusion, handedOff) =>
+    `${handedOff ? '📨 **會議結束，已交給 Claude。**' : '💾 **會議結束，已保存。**'}${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
   meetingLastPrompt: '（會議記錄）',
 }
 

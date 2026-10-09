@@ -22,6 +22,7 @@ import {
   type Guild,
   type TextChannel,
   type ForumChannel,
+  type Webhook,
   type AnyThreadChannel,
   type Message,
   type Interaction,
@@ -40,7 +41,7 @@ import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { homedir } from 'os'
-import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync, openSync, readSync, closeSync } from 'fs'
+import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync, openSync, readSync, closeSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
 import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
@@ -82,12 +83,26 @@ type SessionState = {
   pausedSkipped?: number
   /** A discussion among people in the channel, not sent to Claude until someone @-mentions the bot. */
   meeting?: Meeting
+  /** Finished meetings, oldest first. */
+  meetings?: Meeting[]
   /** The live "working…" message while Claude is busy, kept so a restarted daemon can remove it. */
   statusMessageId?: string
 }
 
-/** A discussion thread under the session channel; forkId is its read-only copy of the session, lastAskedId the last question it answered. */
-type Meeting = { threadId: string; startedAt: number; lastAt: number; reminded?: boolean; forkId?: string; lastAskedId?: string }
+/** A discussion thread under the session channel. Its record lives in meetings/<session>/<threadId>.{md,jsonl}. */
+type Meeting = {
+  threadId: string
+  name?: string
+  startedAt: number
+  lastAt: number
+  reminded?: boolean
+  endedAt?: number
+  conclusion?: string
+  /** Sent to the session when it ended. */
+  handedOff?: boolean
+  /** Already copied into the session's forum post. */
+  replayed?: boolean
+}
 
 /**
  * Access to a session. Owners (allowFrom) can do everything; the rest is per session:
@@ -319,6 +334,8 @@ async function startTracking(s: LiveSession) {
 
 async function endTracking(t: Tracked) {
   pump(t)
+  // Nobody can hand an open meeting to an ended session; keep its record.
+  await closeMeeting(t, { handoff: false })
   await refreshStatus(t, false).catch(() => {})
   await post(t, [m.sessionEnded])
   t.st.ended = true
@@ -412,6 +429,9 @@ async function archiveToForum(t: Tracked) {
     }
   }
   thread ??= await createArchivePost(st, message)
+  // Meeting threads go with the channel; their records are copied into the post first.
+  await closeMeeting(t, { handoff: false })
+  await replayMeetings(t.sessionId, st, thread).catch(e => log('replaying meetings failed:', e?.message ?? e))
   // Point the session at the post before deleting the channel, so channelDelete doesn't forget it.
   st.archiveThreadId = st.channelId = thread.id
   stateDirty = true
@@ -463,6 +483,8 @@ async function moveOwnPosts() {
       continue
     }
     const moved = await createArchivePost(st, archiveMessage(sid, st))
+    for (const mt of st.meetings ?? []) mt.replayed = false
+    await replayMeetings(sid, st, moved).catch(e => log('replaying meetings failed:', e?.message ?? e))
     st.archiveThreadId = st.channelId = moved.id
     stateDirty = true
     await post.delete('discord-sync: moved to this computer\'s forum').catch(e => log('delete old post failed:', e?.message))
@@ -551,8 +573,8 @@ async function migrateToForum(r: Replier) {
 async function onChannelGone(id: string) {
   for (const t of tracked.values()) {
     if (t.st.meeting?.threadId === id) {
-      t.st.meeting = undefined
-      stateDirty = true
+      // The thread is gone but its record isn't.
+      void closeMeeting(t, { handoff: false })
       return
     }
     if (t.st.channelId === id) {
@@ -1987,15 +2009,35 @@ function roleTag(userId: string, st: SessionState): string {
 //
 // @-mentioning people in a session channel opens a thread for the discussion,
 // so the session channel and Claude's context stay clean. In the thread,
-// @-mentioning the bot asks a read-only copy of the session (a fork: Claude
-// Code's `--resume <id> --fork-session`, run headless with only Read, Grep and
-// Glob); "@bot end" closes the thread and hands the whole discussion to the
-// session.
+// @-mentioning the bot asks a throwaway read-only copy of the session (Claude
+// Code's `--resume <id> --fork-session --no-session-persistence`, run headless
+// with only Read, Grep and Glob). "@bot end" closes the thread and hands the
+// discussion to the session; "@bot save" closes it without doing so.
+//
+// Every message is written to disk as it happens (meetings/<session>/<id>.md
+// for people and Claude, .jsonl to replay it), so a meeting survives its thread:
+// when the session is archived to the forum and its channel deleted, the
+// meetings are replayed into the forum post.
 
+const MEETINGS_DIR = join(STATE_DIR, 'meetings')
 const MEETING_IDLE_MS = 30 * 60_000
-const MEETING_MAX_MESSAGES = 1000
 const MEETING_ASK_TIMEOUT_MS = 10 * 60_000
-const MEETING_END_RE = /^(end|結束)\b\s*/i
+const MEETING_END_RE = /^(end|結束)(?=\s|$)\s*/i
+const MEETING_SAVE_RE = /^(save|存檔)(?=\s|$)\s*/i
+
+/** One message of a meeting, as recorded on disk. */
+type MeetingEntry = {
+  id: string
+  ts: number
+  name: string
+  /** owner, collaborator, … or "claude" for the read-only copy's answers. */
+  role: string
+  avatar?: string
+  text: string
+  files?: { name: string; path?: string; url: string }[]
+}
+
+const meetingFile = (sessionId: string, mt: Meeting, ext: 'md' | 'jsonl') => join(MEETINGS_DIR, sessionId, `${mt.threadId}.${ext}`)
 
 function meetingByThread(threadId: string): Tracked | undefined {
   for (const t of tracked.values()) if (t.st.meeting?.threadId === threadId) return t
@@ -2007,17 +2049,75 @@ async function meetingThread(mt: Meeting): Promise<AnyThreadChannel | undefined>
   return th?.isThread() ? th : undefined
 }
 
+function readMeetingEntries(sessionId: string, mt: Meeting): MeetingEntry[] {
+  try {
+    return readFileSync(meetingFile(sessionId, mt, 'jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map(l => JSON.parse(l))
+  } catch {
+    return []
+  }
+}
+
+const utcTime = (ts: number) => new Date(ts).toISOString().slice(11, 16)
+
+function meetingLine(e: MeetingEntry): string {
+  const who = e.role === 'claude' ? 'Claude (read-only copy)' : `${e.name} (${e.role})`
+  const files = (e.files ?? []).map(f => `\n  [attachment: ${f.name} ${f.path ? `saved at ${f.path}` : `(not downloaded: over 25 MB or failed) ${f.url}`}]`).join('')
+  return `**${who}** ${utcTime(e.ts)}: ${e.text}${files}`
+}
+
+/** Writes are queued per meeting so the files keep Discord's order. */
+const meetingWrites = new Map<string, Promise<unknown>>()
+
+/** Append a Discord message to the meeting's record. Meeting notices and bare bot tags are left out. */
+function recordMeetingMessage(t: Tracked, mt: Meeting, x: Message): Promise<unknown> {
+  const run = async () => {
+    if (x.author.bot && x.author.id !== client.user!.id) return
+    const files: MeetingEntry['files'] = []
+    for (const a of x.attachments.values()) files.push({ name: a.name, path: await downloadAttachment(a), url: a.url })
+    const ch = x.channel as TextChannel | AnyThreadChannel
+    // Drop the bot's tag before mentions are turned into @names.
+    const text = cleanContent(x.content.replace(new RegExp(`<@!?${client.user!.id}>`, 'g'), ''), ch).trim()
+    if (!text && !files.length) return
+    const claude = x.author.id === client.user!.id
+    const e: MeetingEntry = {
+      id: x.id,
+      ts: x.createdTimestamp,
+      name: claude ? 'Claude' : x.author.username,
+      role: claude ? 'claude' : roleTag(x.author.id, t.st),
+      avatar: x.author.displayAvatarURL({ size: 128 }),
+      text,
+      ...(files.length ? { files } : {}),
+    }
+    mkdirSync(join(MEETINGS_DIR, t.sessionId), { recursive: true })
+    appendFileSync(meetingFile(t.sessionId, mt, 'jsonl'), JSON.stringify(e) + '\n')
+    appendFileSync(meetingFile(t.sessionId, mt, 'md'), meetingLine(e) + '\n')
+  }
+  const next = (meetingWrites.get(mt.threadId) ?? Promise.resolve()).then(run).catch(e => log('meeting record failed:', e?.message ?? e))
+  meetingWrites.set(mt.threadId, next)
+  return next
+}
+
 async function startMeeting(t: Tracked, msg: Message, people: import('discord.js').User[]) {
   if (t.st.meeting && (await meetingThread(t.st.meeting))) {
     return void msg.reply({ content: m.meetingAlready(t.st.meeting.threadId), allowedMentions: { parse: [] } }).catch(() => {})
   }
+  // The open meeting's thread is gone: keep what was recorded.
+  if (t.st.meeting) await closeMeeting(t, { handoff: false })
   const topic = cleanContent(msg.content, msg.channel as TextChannel).replace(/@\S+/g, '').replace(/\s+/g, ' ').trim()
-  const thread = await msg.startThread({
-    name: clip(`🗣️ ${topic || m.meetingThreadName(new Date().toISOString().slice(11, 16))}`, 100),
-    autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-  })
-  t.st.meeting = { threadId: thread.id, startedAt: Date.now(), lastAt: Date.now() }
+  const name = clip(`🗣️ ${topic || m.meetingThreadName(new Date().toISOString().slice(11, 16))}`, 100)
+  const thread = await msg.startThread({ name, autoArchiveDuration: ThreadAutoArchiveDuration.OneDay })
+  const mt: Meeting = { threadId: thread.id, name, startedAt: Date.now(), lastAt: Date.now() }
+  t.st.meeting = mt
   stateDirty = true
+  mkdirSync(join(MEETINGS_DIR, t.sessionId), { recursive: true })
+  writeFileSync(
+    meetingFile(t.sessionId, mt, 'md'),
+    [`# Meeting "${name}" in #${(msg.channel as TextChannel).name}`, `Session: ${t.sessionId}`, `Started: ${new Date(mt.startedAt).toISOString()} (UTC)`, '', ''].join('\n'),
+  )
+  void recordMeetingMessage(t, mt, msg)
   for (const u of [msg.author, ...people]) if (can(u.id, t.st, 'view')) await thread.members.add(u.id).catch(() => {})
   // The channel is private: point out anyone who can't see it.
   const locked = people.filter(u => !can(u.id, t.st, 'view')).map(u => u.username)
@@ -2026,67 +2126,29 @@ async function startMeeting(t: Tracked, msg: Message, people: import('discord.js
     .catch(() => {})
 }
 
-/** A message in a meeting thread: discussion, a question for the bot, or "@bot end". */
+/** A message in a meeting thread: discussion, a question for the bot, "@bot end" or "@bot save". */
 async function onMeetingMessage(t: Tracked, msg: Message) {
   const mt = t.st.meeting!
   if (!can(msg.author.id, t.st, 'chat')) return void msg.react('🚫').catch(() => {})
   mt.lastAt = Date.now()
   mt.reminded = false
   stateDirty = true
+  void recordMeetingMessage(t, mt, msg)
   if (!msg.mentions.has(client.user!, { ignoreRepliedUser: true, ignoreEveryone: true, ignoreRoles: true })) return
   const text = msg.content.replace(new RegExp(`<@!?${client.user!.id}>`, 'g'), '').trim()
   const end = MEETING_END_RE.exec(text)
-  if (end) return void (await endMeeting(t, msg, text.slice(end[0].length).trim()))
+  if (end) return void (await closeMeeting(t, { by: msg, conclusion: text.slice(end[0].length).trim(), handoff: true }))
+  const save = MEETING_SAVE_RE.exec(text)
+  if (save) return void (await closeMeeting(t, { by: msg, conclusion: text.slice(save[0].length).trim(), handoff: false }))
   if (!text) return void msg.reply({ content: m.meetingAskHint(`<@${client.user!.id}>`), allowedMentions: { parse: [] } }).catch(() => {})
   await askMeeting(t, msg, text)
-}
-
-/** Every message in the thread after `afterId`, up to and including `last` when given, oldest first. */
-async function threadMessages(th: AnyThreadChannel, afterId: string, last?: Message): Promise<Message[]> {
-  const out: Message[] = []
-  let after = afterId
-  while (out.length < MEETING_MAX_MESSAGES) {
-    const batch = [...(await th.messages.fetch({ after, limit: 100 })).values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
-    if (!batch.length) break
-    for (const x of batch) if (!last || BigInt(x.id) <= BigInt(last.id)) out.push(x)
-    after = batch[batch.length - 1].id
-    if (batch.length < 100 || (last && BigInt(after) >= BigInt(last.id))) break
-  }
-  return out
-}
-
-/**
- * Lines of a transcript: people with their role, the bot's answers as the
- * read-only copy, attachments saved locally so Claude can open them. Meeting
- * notices are left out.
- */
-async function transcriptLines(t: Tracked, msgs: Message[], ch: TextChannel | AnyThreadChannel, saved: string[]): Promise<string[]> {
-  const botMention = new RegExp(`<@!?${client.user!.id}>`, 'g')
-  const time = (d: Date) => d.toISOString().slice(11, 16)
-  const lines: string[] = []
-  for (const x of msgs) {
-    if (x.author.bot && (x.author.id !== client.user!.id || x.content.startsWith('🗣️') || x.content.startsWith('📨'))) continue
-    let files = ''
-    for (const a of x.attachments.values()) {
-      const p = await downloadAttachment(a)
-      if (p) saved.push(p)
-      files += `\n  [attachment: ${a.name} ${p ? `saved at ${p}` : `(not downloaded: over 25 MB or failed) ${a.url}`}]`
-    }
-    // Drop the bot's tag before mentions are turned into @names.
-    const text = cleanContent(x.content.replace(botMention, ''), ch).trim()
-    // A bare bot tag leaves nothing to record.
-    if (!text && !files) continue
-    const who = x.author.id === client.user!.id ? 'Claude (read-only copy)' : `${x.author.username} (${roleTag(x.author.id, t.st)})`
-    lines.push(`**${who}** ${time(x.createdAt)}: ${text}${files}`)
-  }
-  return lines
 }
 
 /** Sessions started by this daemon (meeting copies); they must not get channels of their own. */
 const ownRuns = new Set<string>()
 const meetingAsks = new Map<string, Promise<unknown>>()
 
-/** Ask the meeting's read-only copy of the session. One question at a time per meeting. */
+/** Ask a read-only copy of the session. One question at a time per meeting. */
 function askMeeting(t: Tracked, msg: Message, question: string): Promise<unknown> {
   const mt = t.st.meeting!
   const next = (meetingAsks.get(mt.threadId) ?? Promise.resolve()).then(() => answerMeeting(t, mt, msg, question)).catch(e => log('meeting question failed:', e?.message ?? e))
@@ -2100,35 +2162,25 @@ async function answerMeeting(t: Tracked, mt: Meeting, msg: Message, question: st
   const typing = setInterval(() => void th.sendTyping().catch(() => {}), 8000)
   void th.sendTyping().catch(() => {})
   try {
-    // What was said since the last question, so the copy follows the discussion.
-    const saved: string[] = []
-    const before = (await threadMessages(th, mt.lastAskedId ?? th.id, msg)).filter(x => x.id !== msg.id)
-    // The first time, include the message in the session channel that opened the meeting.
-    const starter = mt.lastAskedId ? null : await th.fetchStarterMessage().catch(() => null)
-    if (starter) before.unshift(starter)
-    const lines = await transcriptLines(t, before, th, saved)
-    const qFiles = await downloadAttachments(msg).catch(() => [] as string[])
+    // The copy is new every time, so it gets the whole record, the question included.
+    await meetingWrites.get(mt.threadId)
+    const record = readMeetingEntries(t.sessionId, mt).map(meetingLine).join('\n')
     const prompt = [
-      mt.forkId
-        ? 'More from the discussion thread:'
-        : 'Some people are discussing this session in a Discord thread, apart from the main conversation. You are a read-only copy of the session: ' +
-          'answer their questions from what you know and what you can read, but do not change anything. Reply in the language of the question.\n\nThe discussion so far:',
-      lines.join('\n') || '(nothing yet)',
+      'Some people are discussing this session in a Discord thread, apart from the main conversation. You are a read-only copy of the session: ' +
+        'answer from what you know and what you can read, but do not change anything. Reply in the language of the question.',
       '',
-      `Question from ${msg.author.username} (${roleTag(msg.author.id, t.st)}): ${question}`,
-      qFiles.length ? `Attached: ${qFiles.join('; ')}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n')
-    const r = await runCopy(t, mt, prompt)
+      'The discussion so far:',
+      record || '(nothing yet)',
+      '',
+      `Answer the last message, from ${msg.author.username} (${roleTag(msg.author.id, t.st)}): ${question}`,
+    ].join('\n')
+    const r = await runCopy(t, prompt)
     if (r.error) return void (await msg.reply({ content: m.meetingAskFailed(clip(r.error, 1500)), allowedMentions: { parse: [] } }).catch(() => {}))
-    mt.lastAskedId = msg.id
-    stateDirty = true
     const answer = r.text || '(no answer)'
     for (const [i, p] of pack([{ kind: 'assistant', text: answer }], cfg.attachOver).entries()) {
       const body = typeof p === 'string' ? { content: p } : { content: p.content, files: [new AttachmentBuilder(Buffer.from(p.file, 'utf8'), { name: 'answer.md' })] }
-      if (i === 0) await msg.reply({ ...body, allowedMentions: { parse: [] } })
-      else await th.send({ ...body, allowedMentions: { parse: [] } })
+      const sent = i === 0 ? await msg.reply({ ...body, allowedMentions: { parse: [] } }) : await th.send({ ...body, allowedMentions: { parse: [] } })
+      void recordMeetingMessage(t, mt, sent)
     }
   } finally {
     clearInterval(typing)
@@ -2136,12 +2188,15 @@ async function answerMeeting(t: Tracked, mt: Meeting, msg: Message, question: st
   }
 }
 
-/** Run Claude Code headless on the meeting's copy: forked from the session the first time, resumed after. */
-async function runCopy(t: Tracked, mt: Meeting, prompt: string, presetId = true): Promise<{ text?: string; error?: string }> {
+/**
+ * Run Claude Code headless on a throwaway fork of the session: it sees the
+ * session as it is now and leaves no session of its own behind.
+ */
+async function runCopy(t: Tracked, prompt: string, flags = { presetId: true, ephemeral: true }): Promise<{ text?: string; error?: string }> {
   const claude = Bun.which('claude')
   if (!claude) return { error: '`claude` not found on PATH' }
   // Choosing the copy's ID up front lets the session scan skip it from the start.
-  const id = mt.forkId ?? (presetId ? crypto.randomUUID() : undefined)
+  const id = flags.presetId ? crypto.randomUUID() : undefined
   if (id) ownRuns.add(id)
   const args = [
     '-p',
@@ -2149,7 +2204,10 @@ async function runCopy(t: Tracked, mt: Meeting, prompt: string, presetId = true)
     '--tools', 'Read,Grep,Glob',
     '--strict-mcp-config',
     '--permission-prompts', 'none',
-    ...(mt.forkId ? ['--resume', mt.forkId] : ['--resume', t.sessionId, '--fork-session', ...(id ? ['--session-id', id] : [])]),
+    '--resume', t.sessionId,
+    '--fork-session',
+    ...(id ? ['--session-id', id] : []),
+    ...(flags.ephemeral ? ['--no-session-persistence'] : []),
   ]
   const cmd = IS_WIN && /\.(cmd|bat)$/i.test(claude) ? ['cmd.exe', '/d', '/s', '/c', claude, ...args] : [claude, ...args]
   const proc = Bun.spawn(cmd, { cwd: t.st.cwd, stdin: Buffer.from(prompt, 'utf8'), stdout: 'pipe', stderr: 'pipe', windowsHide: true })
@@ -2157,64 +2215,84 @@ async function runCopy(t: Tracked, mt: Meeting, prompt: string, presetId = true)
   const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
   await proc.exited
   clearTimeout(timer)
+  if (id) setTimeout(() => ownRuns.delete(id), 60_000)
   try {
     const res = JSON.parse(out.trim().split('\n').pop() ?? '')
-    if (typeof res.session_id === 'string') {
-      ownRuns.add(res.session_id)
-      mt.forkId = res.session_id
-      stateDirty = true
-    }
     if (res.is_error) return { error: String(res.result ?? res.subtype ?? 'error') }
     return { text: String(res.result ?? '') }
   } catch {
-    // Older Claude Code may refuse --session-id with --fork-session; the parent-PID check still hides the copy.
-    if (!mt.forkId && presetId && /session-id/i.test(err)) return runCopy(t, mt, prompt, false)
+    // Older Claude Code may refuse these flags; the parent-PID check still hides the copy.
+    if (id && /session-id/i.test(err)) return runCopy(t, prompt, { ...flags, presetId: false })
+    if (flags.ephemeral && /no-session-persistence/i.test(err)) return runCopy(t, prompt, { ...flags, ephemeral: false })
     return { error: (err || out).trim() || `claude exited with ${proc.exitCode}` }
   }
 }
 
-/** Close the thread and send the whole discussion to Claude, with what followed "end" as the conclusion. */
-async function endMeeting(t: Tracked, msg: Message, conclusion: string) {
-  const mt = t.st.meeting!
-  const th = msg.channel as AnyThreadChannel
-  const peer = t.live ? peers.get(t.live.pid) : undefined
-  if (!peer) return void msg.reply(m.readOnlyReply).catch(() => {})
-  if (isPaused(t.st)) return void msg.reply(m.pausedReply).catch(() => {})
-  await meetingAsks.get(mt.threadId)
-  const msgs = await threadMessages(th, th.id, msg)
-  // The message that started it lives in the session channel.
-  const starter = await th.fetchStarterMessage().catch(() => null)
-  const people = [...new Map([...(starter ? [starter] : []), ...msgs].filter(x => !x.author.bot).map(x => [x.author.id, x.author])).values()]
-  const saved: string[] = []
-  const lines = await transcriptLines(t, [...(starter ? [starter] : []), ...msgs], th, saved)
-  const notes = [
-    `# Discussion "${th.name}" in #${th.parent?.name ?? '?'}`,
-    `Participants: ${people.map(u => `${u.username} (${roleTag(u.id, t.st)})`).join(', ')}`,
-    `${new Date(mt.startedAt).toISOString()} – ${msg.createdAt.toISOString()} (UTC)`,
-    '',
-    ...lines,
-  ].join('\n')
-  mkdirSync(INBOX_DIR, { recursive: true })
-  const file = join(INBOX_DIR, `meeting-${Date.now()}.md`)
-  writeFileSync(file, notes)
-  ipcSend(peer, {
-    t: 'message',
-    content: conclusion || '(no conclusion given)',
-    meta: {
-      message_id: msg.id,
-      user: msg.author.username,
-      ...(isOwner(msg.author.id) ? {} : { role: roleTag(msg.author.id, t.st) }),
-      ts: msg.createdAt.toISOString(),
-      meeting: `${lines.length} messages from ${people.map(u => u.username).join(', ')}`,
-      attachments: [file, ...saved].join('; '),
-    },
-  })
+/**
+ * Finish the open meeting: complete its record, and with `handoff` send it to
+ * Claude (when the session can take messages). `by` is the "@bot end/save"
+ * message; without it (session ended, thread deleted) nothing is posted.
+ */
+async function closeMeeting(t: Tracked, opts: { by?: Message; conclusion?: string; handoff: boolean }) {
+  const mt = t.st.meeting
+  if (!mt) return
   t.st.meeting = undefined
-  t.st.lastPrompt = (conclusion || m.meetingLastPrompt).replace(/\s+/g, ' ').slice(0, 200)
   stateDirty = true
+  await meetingAsks.get(mt.threadId)
+  await meetingWrites.get(mt.threadId)
   meetingAsks.delete(mt.threadId)
-  await msg.reply({ content: m.meetingEnded(lines.length), allowedMentions: { parse: [] } }).catch(() => {})
-  await post(t, [m.meetingEndedChannel(th.id, conclusion ? clip(conclusion, 1500) : undefined)])
+  meetingWrites.delete(mt.threadId)
+
+  const peer = t.live ? peers.get(t.live.pid) : undefined
+  const handoff = opts.handoff && !!peer && !isPaused(t.st)
+  const entries = readMeetingEntries(t.sessionId, mt)
+  const people = [...new Map(entries.filter(e => e.role !== 'claude').map(e => [e.name, e.role])).entries()]
+  mt.endedAt = Date.now()
+  mt.conclusion = opts.conclusion || undefined
+  mt.handedOff = handoff
+  mkdirSync(join(MEETINGS_DIR, t.sessionId), { recursive: true })
+  const md = meetingFile(t.sessionId, mt, 'md')
+  appendFileSync(
+    md,
+    [
+      '',
+      '---',
+      `Ended: ${new Date(mt.endedAt).toISOString()} (UTC)`,
+      `Participants: ${people.map(([n, r]) => `${n} (${r})`).join(', ') || '(none)'}`,
+      `Conclusion: ${mt.conclusion ?? '(none given)'}`,
+      `Sent to Claude: ${handoff ? 'yes' : 'no'}`,
+      '',
+    ].join('\n'),
+  )
+  ;(t.st.meetings ??= []).push(mt)
+
+  if (handoff) {
+    const by = opts.by!
+    ipcSend(peer!, {
+      t: 'message',
+      content: mt.conclusion ?? '(no conclusion given)',
+      meta: {
+        message_id: by.id,
+        user: by.author.username,
+        ...(isOwner(by.author.id) ? {} : { role: roleTag(by.author.id, t.st) }),
+        ts: by.createdAt.toISOString(),
+        meeting: `${entries.length} messages from ${people.map(([n]) => n).join(', ')}`,
+        attachments: [md, ...entries.flatMap(e => (e.files ?? []).flatMap(f => (f.path ? [f.path] : [])))].join('; '),
+      },
+    })
+    t.st.lastPrompt = (mt.conclusion ?? m.meetingLastPrompt).replace(/\s+/g, ' ').slice(0, 200)
+  }
+  if (!opts.by) {
+    // Session ended: if the thread outlives the channel's archiving, close it so nothing goes unrecorded.
+    const th = await meetingThread(mt)
+    await th?.setLocked(true).catch(() => {})
+    await th?.setArchived(true).catch(() => {})
+    return
+  }
+  const th = opts.by.channel as AnyThreadChannel
+  const reply = handoff ? m.meetingEnded(entries.length) : opts.handoff ? m.meetingSavedNoPeer(entries.length) : m.meetingSaved(entries.length)
+  await opts.by.reply({ content: reply, allowedMentions: { parse: [] } }).catch(() => {})
+  await post(t, [handoff ? m.meetingEndedChannel(th.id, mt.conclusion ? clip(mt.conclusion, 1500) : undefined) : m.meetingSavedChannel(th.id)])
   await th.setLocked(true).catch(() => {})
   await th.setArchived(true).catch(() => {})
 }
@@ -2226,6 +2304,58 @@ function remindIdleMeeting(t: Tracked) {
   mt.reminded = true
   stateDirty = true
   void meetingThread(mt).then(th => th?.send({ content: m.meetingIdle(`<@${client.user!.id}>`), allowedMentions: { parse: [] } }).catch(() => {}))
+}
+
+/** Our webhook in the archive forum, to replay meetings under each speaker's name; undefined without Manage Webhooks. */
+async function archiveWebhook(forum: ForumChannel): Promise<Webhook | undefined> {
+  try {
+    const hooks = await forum.fetchWebhooks()
+    return hooks.find(h => h.owner?.id === client.user!.id && h.name === 'discord-sync') ?? (await forum.createWebhook({ name: 'discord-sync' }))
+  } catch (e: any) {
+    log('no webhook in the archive forum (needs Manage Webhooks); replaying meetings as the bot:', e?.message ?? e)
+    return undefined
+  }
+}
+
+/** Webhook display names can't contain "discord" or "clyde". */
+const webhookName = (s: string) => clip(s.replace(/discord/gi, 'disc0rd').replace(/clyde/gi, 'clyd3'), 80)
+
+/** Replay the session's finished meetings into its forum post: a header with the .md, every message, the conclusion. */
+async function replayMeetings(sessionId: string, st: SessionState, postThread: AnyThreadChannel) {
+  const pending = (st.meetings ?? []).filter(mt => !mt.replayed)
+  if (!pending.length) return
+  const forum = postThread.parent?.type === ChannelType.GuildForum ? postThread.parent : undefined
+  const hook = forum ? await archiveWebhook(forum) : undefined
+  const localTime = (ts: number) => new Date(ts).toLocaleString('sv-SE', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  for (const mt of pending) {
+    const entries = readMeetingEntries(sessionId, mt)
+    const md = meetingFile(sessionId, mt, 'md')
+    const when = `<t:${Math.floor(mt.startedAt / 1000)}:f>`
+    await postThread.send({
+      content: m.meetingReplayHeader(mt.name ?? 'meeting', when, entries.length),
+      files: statSync(md, { throwIfNoEntry: false }) ? [new AttachmentBuilder(md, { name: 'meeting.md' })] : [],
+      allowedMentions: { parse: [] },
+    })
+    for (const e of entries) {
+      const files = (e.files ?? []).filter(f => f.path && statSync(f.path, { throwIfNoEntry: false })).map(f => new AttachmentBuilder(f.path!, { name: f.name }))
+      const name = `${e.role === 'claude' ? m.meetingClaudeName : e.name} · ${localTime(e.ts)}`
+      const parts = e.text ? chunk(e.text) : ['']
+      for (const [i, part] of parts.entries()) {
+        const send = (withFiles: boolean, note = '') => {
+          const content = (part + note).trim() || undefined
+          const extra = withFiles && i === 0 && files.length ? { files } : {}
+          return hook
+            ? hook.send({ threadId: postThread.id, username: webhookName(name), avatarURL: e.avatar, content, allowedMentions: { parse: [] }, ...extra })
+            : postThread.send({ content: clip(`**${name}**\n${content ?? ''}`, 2000), allowedMentions: { parse: [] }, ...extra })
+        }
+        // An attachment over the server's upload limit shouldn't sink the rest of the replay.
+        await send(true).catch(() => send(false, i === 0 && files.length ? `\n-# ${m.meetingReplayFilesFailed(files.length)}` : ''))
+      }
+    }
+    await postThread.send({ content: m.meetingReplayFooter(mt.conclusion ? clip(mt.conclusion, 1500) : undefined, !!mt.handedOff), allowedMentions: { parse: [] } })
+    mt.replayed = true
+    stateDirty = true
+  }
 }
 
 // ---- pausing --------------------------------------------------------------------
