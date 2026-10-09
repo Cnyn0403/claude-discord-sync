@@ -5,7 +5,7 @@
  * answers are offered as defaults and nothing is overwritten without asking.
  */
 import { mkdirSync, writeFileSync, chmodSync } from 'fs'
-import { CONFIG_FILE, ENV_FILE, STATE_DIR, findToken, readConfigFile } from './config'
+import { CONFIG_FILE, ENV_FILE, STATE_DIR, findToken, readConfigFile, otherClaim } from './config'
 import { IS_WIN, hasTmux } from './platform'
 import { installShortcut, shortcutOnPath, addToUserPath, SHORTCUT, SHORTCUT_DIR } from './shortcut'
 import { installAutostart, autostartInstalled, daemonRunning, logHint } from './autostart'
@@ -33,7 +33,11 @@ const text = {
     invite: (url: string) => `Invite the bot to a private server you own:\n  ${url}`,
     waitGuild: 'Press Enter once the bot has joined the server…',
     noGuild: "✗ The bot isn't in any server yet.",
-    pickGuild: 'The bot is in several servers. Which one should it use?',
+    pickGuild: 'Which server should this computer use?',
+    oneGuildPerComputer: 'One bot can serve several computers, but each computer needs its own server.',
+    guildTaken: (host: string) => `(used by ${host})`,
+    inviteAnother: 'Invite the bot to another server',
+    useTakenAnyway: 'Another computer is using that server. Use it anyway (only if that computer has stopped for good)? y/N',
     guildOk: (name: string) => `✓ Using the server "${name}"`,
     userTitle: 'Who may control Claude',
     userGuide: 'Your Discord user ID: in Discord, open Settings → Advanced and turn on Developer Mode, then right-click your name → "Copy User ID".',
@@ -80,7 +84,11 @@ const text = {
     invite: (url: string) => `把 bot 邀請到你自己的私人伺服器：\n  ${url}`,
     waitGuild: 'bot 加入伺服器後，按 Enter 繼續…',
     noGuild: '✗ bot 還沒有加入任何伺服器。',
-    pickGuild: 'bot 在好幾個伺服器裡，要用哪一個？',
+    pickGuild: '這台電腦要用哪個伺服器？',
+    oneGuildPerComputer: '同一個 bot 可以給好幾台電腦用，但每台電腦需要各自的伺服器。',
+    guildTaken: (host: string) => `（${host} 使用中）`,
+    inviteAnother: '把 bot 邀請到其他伺服器',
+    useTakenAnyway: '這個伺服器有另一台電腦在使用。確定還是要用嗎（只有那台電腦已經不再使用時才選 y）？y/N',
     guildOk: (name: string) => `✓ 使用伺服器「${name}」`,
     userTitle: '誰可以操作 Claude',
     userGuide: '你的 Discord user ID：在 Discord 的「設定 → 進階」開啟開發者模式，然後在自己的名字上按右鍵 →「複製使用者 ID」。',
@@ -126,7 +134,7 @@ const hasMessageContent = (app: App) => ((app.flags ?? 0) & ((1 << 18) | (1 << 1
  * View Channels, Manage Channels, Add Reactions, Send Messages, Embed Links, Attach Files, Read History,
  * Manage Roles (private channels, /share), Manage Threads, Create Public Threads, Send in Threads.
  */
-const PERMISSIONS = [10n, 4n, 6n, 11n, 14n, 15n, 16n, 28n, 34n, 35n, 38n].reduce((acc, bit) => acc | (1n << bit), 0n)
+const PERMISSIONS = [10n, 4n, 6n, 11n, 14n, 15n, 16n, 28n, 34n, 35n, 38n, 51n].reduce((acc, bit) => acc | (1n << bit), 0n)
 
 // ---- steps ----------------------------------------------------------------------
 
@@ -173,12 +181,34 @@ async function main() {
       if (!guilds.length) console.log(t.noGuild)
     }
   }
-  let guild = guilds.find(g => g.id === existing.guildId) ?? guilds[0]
-  if (guilds.length > 1) {
+  // One computer per server: show which servers another computer is already running.
+  const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${app!.id}&scope=bot%20applications.commands&permissions=${PERMISSIONS}`
+  let guild: { id: string; name: string } | undefined
+  console.log(t.oneGuildPerComputer)
+  while (!guild) {
+    const taken = new Map<string, string>()
+    for (const g of guilds) {
+      const channels = (await discord<{ type: number; topic?: string | null }[]>(token!, `/guilds/${g.id}/channels`)) ?? []
+      const claim = channels.map(c => otherClaim(c.topic)).find(Boolean)
+      if (claim) taken.set(g.id, claim.name ?? claim.host)
+    }
+    const free = guilds.filter(g => !taken.has(g.id))
+    const preferred = free.find(g => g.id === existing.guildId) ?? free[0]
     console.log(t.pickGuild)
-    guilds.forEach((g, i) => console.log(`  ${i + 1}) ${g.name}`))
-    const n = Number(await ask('>', String(guilds.indexOf(guild) + 1)))
-    guild = guilds[n - 1] ?? guild
+    guilds.forEach((g, i) => console.log(`  ${i + 1}) ${g.name}${taken.has(g.id) ? `  ${t.guildTaken(taken.get(g.id)!)}` : ''}`))
+    console.log(`  0) ${t.inviteAnother}`)
+    const answer = await ask('>', preferred ? String(guilds.indexOf(preferred) + 1) : '0')
+    const n = Number(answer)
+    if (n === 0) {
+      console.log(t.invite(inviteUrl))
+      await ask(t.waitGuild)
+      guilds = (await discord<{ id: string; name: string }[]>(token!, '/users/@me/guilds')) ?? guilds
+      continue
+    }
+    const picked = guilds[n - 1]
+    if (!picked) continue
+    if (taken.has(picked.id) && (await ask(t.useTakenAnyway, 'n')).toLowerCase() !== 'y') continue
+    guild = picked
   }
   console.log(t.guildOk(guild.name))
 

@@ -6,7 +6,7 @@
 const en = {
   // channel defaults
   consoleChannelName: 'claude-console',
-  archiveForumName: 'claude-archive',
+  archiveCategoryName: 'Claude Sessions (ended)',
 
   // session lifecycle
   syncStarted: '🟢 **Session sync started**',
@@ -21,11 +21,6 @@ const en = {
   statusWorking: (elapsed: string, doing: string) => `-# ⏳ Working · ${elapsed} · ${doing}`,
   statusTool: (label: string, running?: string) => (running ? `🔧 ${label} (${running})` : `🔧 ${label}`),
   statusThinking: '💭 thinking',
-  devicesTopic: 'Computers sharing this bot (claude-discord-sync multi-machine mode). Each entry is kept up to date by its computer; please leave them alone.',
-  deviceOffline: (name: string, online: string[]) => `⚫ **${name}** is offline or unknown. Online: ${online.join(', ') || '(none)'}`,
-  deviceOfflineChoice: (name: string) => `⚫ ${name} (offline)`,
-  pickDevice: 'Pick a computer first.',
-  whichDevice: (online: string[]) => `This channel doesn't belong to any computer. Use the command in a computer's console or session channel, or \`/new\` with a computer. Online: ${online.join(', ')}`,
   duration: (min: number, sec: number) => (min ? `${min}m ${sec}s` : `${sec}s`),
 
   // rendering
@@ -37,21 +32,8 @@ const en = {
   fullTextAttached: '-# 📎 Full text attached',
 
   // forum archive
-  forumTopic: 'Ended Claude Code sessions. Press "▶️ Resume" in a post or type /resume to continue; deleting a post removes it from the lists.',
-  olderOmitted: '…(earlier content omitted)',
-  resume: 'Resume',
-  endedAt: (ts: string) => `🔴 Ended ${ts}`,
-  lastPrompt: (text: string) => `💬 Last message: ${text}`,
-  resumeHint: '-# Press "Resume" or type `/resume` here to continue',
 
   // migration
-  noForum: 'No forum configured (`archiveForumName` is empty).',
-  alreadyMigrating: 'Already migrating.',
-  nothingToMigrate: 'Nothing to migrate.',
-  forumStillUnavailable: (err: string) => `⚠️ Still can't create the forum: ${err}`,
-  migrating: (done: number, total: number) => `🗂️ Migrating… ${done}/${total}`,
-  migrated: (moved: number, dropped: number) => `✅ Done: ${moved} moved to the forum, ${dropped} without a conversation deleted.`,
-  migrateFailed: (n: number) => `⚠️ ${n} failed:`,
 
   // permissions
   permissionNeeded: (tool: string) => `🔐 **Permission needed: ${tool}**`,
@@ -149,7 +131,6 @@ const en = {
   endMenu: '👋 End a session…',
   resumeMenu: '▶️ Resume an ended session…',
   newSession: 'New session',
-  migrateButton: (n: number) => `Move ${n} old channels to the forum`,
   consoleTopic: 'Status of every Claude Code session; you can also type /new or !new here',
   folder: 'Folder',
   firstMessage: 'First message (optional)',
@@ -195,16 +176,11 @@ const en = {
   meetingThreadName: (time: string) => `Meeting ${time}`,
   meetingAskHint: (bot: string) => `Ask a question after ${bot}, \`${bot} end\` to hand the meeting to Claude, or \`${bot} save\` to just keep the record.`,
   meetingAskFailed: (error: string) => `⚠️ The read-only copy couldn't answer: ${error}`,
-  meetingEndedChannel: (threadId: string, conclusion?: string) =>
-    `📨 Meeting <#${threadId}> is over; the discussion went to Claude.${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
-  meetingSavedChannel: (threadId: string) => `💾 Meeting <#${threadId}> is over and saved (not sent to Claude).`,
   meetingNoAccess: (names: string) => `⚠️ ${names} can't see this channel; use \`/share\` to let them in.`,
   meetingEnded: (n: number) => `📨 Meeting over: sent the discussion (${n} messages) to Claude. This thread is now closed.`,
   meetingSaved: (n: number) => `💾 Meeting over: the record (${n} messages) is saved and Claude wasn't told. This thread is now closed.`,
   meetingSavedNoPeer: (n: number) => `💾 The session can't take messages right now (read-only or paused), so the meeting (${n} messages) was saved but not sent to Claude. This thread is now closed.`,
   meetingIdle: (bot: string) => `🗣️ The meeting has been quiet for 30 minutes. \`${bot} end\` + the conclusion hands it to Claude; \`${bot} save\` just keeps the record.`,
-  meetingClaudeName: 'Claude (read-only copy)',
-  meetingArchived: (name: string, when: string, n: number, status: string) => `🗣️ **${name}**\n-# Meeting · ${when} · ${n} messages · ${status} · download the HTML file to read it`,
   htmlMeeting: 'Meeting',
   htmlConclusion: 'Conclusion',
   htmlNoConclusion: 'No conclusion given',
@@ -216,6 +192,12 @@ const en = {
   htmlFileNotEmbedded: (name: string, path?: string) => (path ? `${name} (not embedded; saved at ${path})` : `${name} (not downloaded)`),
   htmlGenerated: 'Meeting record from claude-discord-sync',
   meetingLastPrompt: '(meeting notes)',
+  meetingRecorded: (name: string, when: string, n: number, status: string, threadId: string, conclusion?: string) =>
+    `🗣️ **Meeting recorded: ${name.replace(/^🗣️\s*/, '')}**\n-# ${when} · ${n} messages · ${status} · <#${threadId}> · open the HTML file in a browser to read it` +
+    (conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''),
+  meetingRecordAt: (url: string) => `The record is pinned in the session channel: ${url}`,
+  madeRoom: (channels: string) => `🧹 The server was close to Discord's 500-channel limit, so the channels of the sessions that ended longest ago were deleted (their conversations are still on this computer): ${channels}`,
+  guildTaken: (host: string) => `⚠️ **${host}** tried to start discord-sync in this server, but another computer is already using it. Each computer needs its own server; run setup on ${host} and pick a different one.`,
 } as const
 
 type Widen<T> = { [K in keyof T]: T[K] extends string ? string : T[K] }
@@ -223,7 +205,7 @@ export type Messages = Widen<typeof en>
 
 const zhTW: Messages = {
   consoleChannelName: 'claude-控制台',
-  archiveForumName: 'claude-已結束',
+  archiveCategoryName: 'Claude 已結束',
 
   syncStarted: '🟢 **Session 開始同步**',
   twoWay: '💬 雙向模式：可以直接在這裡對 Claude 說話',
@@ -237,11 +219,6 @@ const zhTW: Messages = {
   statusWorking: (elapsed, doing) => `-# ⏳ 工作中 · ${elapsed} · ${doing}`,
   statusTool: (label, running) => (running ? `🔧 ${label}（${running}）` : `🔧 ${label}`),
   statusThinking: '💭 思考中',
-  devicesTopic: '共用這個 bot 的電腦（claude-discord-sync 多台電腦模式）。每則訊息由各自的電腦自動更新，請不要修改。',
-  deviceOffline: (name, online) => `⚫ **${name}** 目前離線或不存在。在線的電腦：${online.join('、') || '（無）'}`,
-  deviceOfflineChoice: name => `⚫ ${name}（離線）`,
-  pickDevice: '請先選擇電腦。',
-  whichDevice: online => `這個頻道不屬於任何一台電腦。請在某台電腦的控制台或 session 頻道使用指令，或用 \`/new\` 並選擇電腦。在線的電腦：${online.join('、')}`,
   duration: (min, sec) => (min ? `${min} 分 ${sec} 秒` : `${sec} 秒`),
 
   localInput: '👤 **本地輸入**',
@@ -251,20 +228,7 @@ const zhTW: Messages = {
   toolFailed: tool => `-# ⚠️ ${tool} 失敗`,
   fullTextAttached: '-# 📎 全文見附檔',
 
-  forumTopic: '已結束的 Claude Code session。按貼文裡的「▶️ 恢復」或輸入 /resume 可以接著做；刪掉貼文就會從清單移除。',
-  olderOmitted: '…（較早的內容已省略）',
-  resume: '恢復',
-  endedAt: ts => `🔴 結束於 ${ts}`,
-  lastPrompt: text => `💬 最後說的話：${text}`,
-  resumeHint: '-# 按「恢復」或在這裡輸入 `/resume` 可以接著做',
 
-  noForum: '沒有設定論壇（`archiveForumName` 是空的）。',
-  alreadyMigrating: '已經在搬了。',
-  nothingToMigrate: '沒有需要搬的頻道。',
-  forumStillUnavailable: err => `⚠️ 還是沒辦法建立論壇：${err}`,
-  migrating: (done, total) => `🗂️ 搬移中… ${done}/${total}`,
-  migrated: (moved, dropped) => `✅ 搬好了：${moved} 個搬到論壇，${dropped} 個沒有對話的直接刪除。`,
-  migrateFailed: n => `⚠️ ${n} 個失敗：`,
 
   permissionNeeded: tool => `🔐 **需要權限：${tool}**`,
   permissionReplyHint: id => `-# 也可以回覆 \`yes ${id}\` / \`no ${id}\``,
@@ -355,7 +319,6 @@ const zhTW: Messages = {
   endMenu: '👋 結束 session…',
   resumeMenu: '▶️ 恢復已結束的 session…',
   newSession: '開新 session',
-  migrateButton: n => `把 ${n} 個舊頻道搬到論壇`,
   consoleTopic: '所有 Claude Code session 的狀態；也可以在這裡輸入 /new 或 !new',
   folder: '資料夾',
   firstMessage: '第一句話（選填）',
@@ -397,16 +360,11 @@ const zhTW: Messages = {
   meetingThreadName: time => `會議 ${time}`,
   meetingAskHint: bot => `在 ${bot} 後面寫上問題；用 \`${bot} end\` 把會議交給 Claude，或用 \`${bot} save\` 只保存紀錄。`,
   meetingAskFailed: error => `⚠️ 唯讀分身無法回答：${error}`,
-  meetingEndedChannel: (threadId, conclusion) =>
-    `📨 會議 <#${threadId}> 結束了，討論內容已交給 Claude。${conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''}`,
-  meetingSavedChannel: threadId => `💾 會議 <#${threadId}> 結束了，紀錄已保存（沒有交給 Claude）。`,
   meetingNoAccess: names => `⚠️ ${names} 看不到這個頻道，可以用 \`/share\` 分享給他。`,
   meetingEnded: n => `📨 會議結束：已把討論內容（${n} 則訊息）交給 Claude，這個討論串已關閉。`,
   meetingSaved: n => `💾 會議結束：紀錄（${n} 則訊息）已保存，沒有交給 Claude。這個討論串已關閉。`,
   meetingSavedNoPeer: n => `💾 這個 session 目前無法接收訊息（唯讀或已暫停），所以會議（${n} 則訊息）只保存了紀錄，沒有交給 Claude。這個討論串已關閉。`,
   meetingIdle: bot => `🗣️ 會議已經 30 分鐘沒有人說話了。用 \`${bot} end\` 加上結論會交給 Claude；用 \`${bot} save\` 只保存紀錄。`,
-  meetingClaudeName: 'Claude（唯讀分身）',
-  meetingArchived: (name, when, n, status) => `🗣️ **${name}**\n-# 會議 · ${when} · ${n} 則訊息 · ${status} · 下載 HTML 檔即可閱讀`,
   htmlMeeting: '會議',
   htmlConclusion: '結論',
   htmlNoConclusion: '沒有寫結論',
@@ -418,6 +376,12 @@ const zhTW: Messages = {
   htmlFileNotEmbedded: (name, path) => (path ? `${name}（沒有內嵌，存在 ${path}）` : `${name}（沒有下載到）`),
   htmlGenerated: 'claude-discord-sync 會議紀錄',
   meetingLastPrompt: '（會議記錄）',
+  meetingRecorded: (name, when, n, status, threadId, conclusion) =>
+    `🗣️ **會議已紀錄：${name.replace(/^🗣️\s*/, '')}**\n-# ${when} · ${n} 則訊息 · ${status} · <#${threadId}> · 用瀏覽器打開 HTML 檔閱讀` +
+    (conclusion ? `\n> ${conclusion.replace(/\n/g, '\n> ')}` : ''),
+  meetingRecordAt: url => `會議紀錄已釘選在 session 頻道：${url}`,
+  madeRoom: channels => `🧹 伺服器快到 Discord 500 個頻道的上限，已刪除最久以前結束的 session 頻道（對話紀錄仍保留在這台電腦上）：${channels}`,
+  guildTaken: host => `⚠️ **${host}** 想在這個伺服器啟動 discord-sync，但已經有另一台電腦在使用。每台電腦需要各自的伺服器，請在 ${host} 重新執行設定並選擇其他伺服器。`,
 }
 
 export const LANGUAGES = { en, 'zh-TW': zhTW } as const satisfies Record<string, Messages>
@@ -436,12 +400,10 @@ export function setLanguage(lang: string | undefined): Language {
 export const SLASH_DESCRIPTIONS = {
   new: { en: 'Start a new Claude Code session in tmux', 'zh-TW': '在 tmux 裡開一個新的 Claude Code session' },
   dir: { en: 'Folder', 'zh-TW': '資料夾' },
-  device: { en: 'Which computer', 'zh-TW': '哪一台電腦' },
   prompt: { en: 'First message (optional)', 'zh-TW': '第一句話（選填）' },
   stop: { en: "Interrupt this session's current work (presses Esc)", 'zh-TW': '中斷這個 session 目前的工作（按 Esc）' },
   end: { en: 'End this session (/exit)', 'zh-TW': '結束這個 session（/exit）' },
   resume: { en: 'Resume this ended session', 'zh-TW': '恢復這個已結束的 session' },
-  migrate: { en: 'Move old archived channels into the forum', 'zh-TW': '把舊的已結束頻道搬到論壇' },
   mode: { en: "Switch this session's permission mode (Shift+Tab)", 'zh-TW': '切換這個 session 的權限模式（Shift+Tab）' },
   modeName: { en: 'Mode', 'zh-TW': '模式' },
   model: { en: "Switch this session's model (/model)", 'zh-TW': '切換這個 session 的模型（/model）' },

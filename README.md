@@ -15,7 +15,7 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
  │   #claude-console      │   │  ├ watches ~/.claude/sessions/*.json         │
  │   #proj-15ab  ◀────────┼───┤  ├ tails transcript JSONL → posts to channel │
  │   #web-ffe3            │   │  └ Unix socket ◀──┐                          │
- │   🗂️ archive forum     │   │                   │                          │
+ │ 📁 … (ended)           │   │                   │                          │
  └───────────────────────┘   │ channel-server.ts (one per ccd session)      │
                              │  └ MCP channel: Discord ⇄ Claude Code         │
                              │ ask-hook.ts / stop-hook.ts (ccd hooks)       │
@@ -31,8 +31,9 @@ The Discord-facing text is available in English and Traditional Chinese (`"langu
 - **Done notifications.** You're @-mentioned when Claude finishes a turn that took a while.
 - **Session control:** `/new`, `/stop`, `/end`, `/resume` (or `!new`, `!stop`, …). New and resumed sessions run in a detached tmux session you can `tmux attach` to locally.
 - **Console channel** listing every session with its status, plus menus to stop / end / resume and a button to start a new one.
-- **Forum archive.** Ended sessions become a forum post with the full conversation attached and a *Resume* button. Falls back to an archive category if the server can't create forums.
-- **Cleanup.** Forum posts are kept; archived text channels (when no forum can be used) are deleted after a week. Both are configurable.
+- **Archive.** Ended sessions keep their channel, meeting threads included, and move to an archive category (`Claude Sessions (ended)`, then `…-2`, `…-3` as each fills its 50 channels). `/resume` moves a channel back.
+- **Cleanup.** Only when the server nears Discord's 500-channel limit are the channels of the sessions that ended longest ago deleted (the console says which); their transcripts and meeting records stay on your computer. A time limit is optional.
+- **Several computers, one bot.** Each computer uses its own server; see [Several computers](#several-computers-one-bot).
 
 ## Requirements
 
@@ -115,8 +116,7 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/new <dir> [prompt]` | anywhere | Start `ccd` in `<dir>` inside tmux. `dir` autocompletes subfolders and recently used folders |
 | `/stop` | session channel | Interrupt the current turn (presses Esc) |
 | `/end` | session channel | Interrupt if busy, then `/exit` |
-| `/resume` | archive post or ended channel | `ccd --resume <id>` in tmux; a new channel is created |
-| `/migrate` | anywhere | Move sessions archived as text channels into the forum |
+| `/resume` | ended channel | `ccd --resume <id>` in tmux; the channel moves back from the archive |
 | `/share @user <role>` | session channel | Give someone access to this session (see [Sharing](#sharing)) |
 | `/unshare @user` | session channel | Remove their access |
 | `/members` | session channel | List who can access this session |
@@ -138,7 +138,7 @@ Session channels are private: only the bot and the owners in `allowFrom` can see
 | Approve permission prompts and plans | ✅ | ✅ | | |
 | `/end`, `/share`, `/new`, `/resume`, the console | ✅ | | | |
 
-Collaborators' messages reach Claude marked with their role. Anyone who can talk to Claude can make it act on your computer, so share with care. Access is kept across `/resume`; archived forum posts are visible to owners only.
+Collaborators' messages reach Claude marked with their role. Anyone who can talk to Claude can make it act on your computer, so share with care. Access is kept across `/resume` and in the archive.
 
 This needs the bot's **Manage Roles** permission. Without it the daemon logs a warning, channels stay visible to the whole server and `/share` is disabled.
 
@@ -150,7 +150,7 @@ To talk things over with the people you shared a session with, without clutterin
 2. **Ask Claude:** in the thread, @-mention the bot with a question. A read-only copy of the session answers: it knows the conversation so far and can read files (Read, Grep, Glob), but can't change anything, and the questions don't reach the session itself. Under the hood each question is a fresh, throwaway `claude -p --resume <session> --fork-session --no-session-persistence` that is given the discussion so far: it always sees the session as it is now, leaves no extra session behind in `claude --resume`, and costs a normal request.
 3. **Finish:** `@bot end`, optionally followed by the conclusion ("@bot end let's go with option A"). The thread is closed and Claude receives the whole discussion as a Markdown file (who said what, with their role, the copy's answers, attachments saved locally) plus the conclusion. With no conclusion, Claude summarizes the discussion and proposes next steps. `@bot save` (optionally with a conclusion) closes the thread and only keeps the record; Claude isn't told.
 
-**Records.** Every message is written to disk as it is said, in `~/.claude/channels/discord-sync/meetings/<session-id>/<thread-id>.jsonl` (plus a `.md` copy that is what Claude gets), so a meeting is kept even if the thread is deleted or never ended. When a meeting closes it is rendered as **one self-contained HTML page** laid out like Discord: avatars, names and times, Markdown (code blocks and tables included) and images inline, all embedded so it opens offline in any browser. The page is attached to the closing message in the thread, and when the session ends and is archived to the forum, each meeting is posted in the forum post as one message with its page attached (the thread itself goes with the deleted channel). A meeting still open when the session ends is saved, not sent to Claude.
+**Records.** Every message is written to disk as it is said, in `~/.claude/channels/discord-sync/meetings/<session-id>/<thread-id>.jsonl` (plus a `.md` copy that is what Claude gets), so a meeting is kept even if the thread is deleted or never ended. When a meeting closes, the session channel gets a **"Meeting recorded"** message, pinned, with the meeting as **one self-contained HTML page**: laid out like Discord with avatars, names and times, Markdown (code blocks and tables included) and images inline, all embedded so it opens offline in any browser. The channel's pins thus list every meeting the session had. A meeting still open when the session ends is saved and recorded, not sent to Claude. Pinning needs the **Pin Messages** permission; without it the record is posted unpinned.
 
 Only people who can see the session channel can join (use `/share`). The bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own. A message mentioning both a person and the bot is a normal message to Claude, not a meeting.
 
@@ -163,21 +163,11 @@ Pause mirroring when you're about to work on something that shouldn't reach Disc
 
 While paused, nothing from the session is posted (not even its title in the console), questions, plans and permission prompts are answered in the terminal, and messages sent on Discord are not passed to Claude. On resume, the paused stretch is **not** posted afterwards; the channel just says how many messages were skipped.
 
-## Several computers, one bot (experimental)
+## Several computers, one bot
 
-By default, use one bot per computer. To share one bot and server between computers, give each computer a name in its `config.json`:
+One bot can serve several computers, as long as **each computer uses its own server**: invite the bot to one server per computer and pick it in that computer's setup (`claude-discord-sync setup`). Every daemon receives every server's events and handles only its own, so nothing has to be coordinated between computers.
 
-```json
-{ "machine": "home-server" }
-```
-
-Set it on **every** computer that shares the bot, with a different name on each, then restart their daemons. Each computer then:
-
-- gets its own category (`Claude Sessions · home-server`) holding its console (`claude-console-home-server`), its session channels and its archive forum (`claude-archive-home-server`). Its existing channels move there, and its posts in the forum the computers used to share are posted again in its own forum (the shared one is deleted once empty);
-- keeps an entry in a shared `#claude-devices` channel, updated every minute, so the computers know who is online;
-- handles only what happens in its own channels. `/new` takes a computer first (autocomplete lists them) and runs only there.
-
-Every computer receives every command. Without talking to each other, they agree on a "leader", the first online computer by name, which answers what belongs to nobody: the computer list, a computer that is offline, and commands used outside any computer's channels. For a few seconds after a computer starts or stops, an autocomplete may come back empty; try again.
+Setup marks servers another computer is already using. A daemon also checks at startup: the console channel's topic records which computer runs the server and when it last checked in (every few minutes), and a daemon that finds another computer active there in the last 20 minutes says so in the console and exits.
 
 ## Configuration
 
@@ -190,7 +180,6 @@ Every computer receives every command. Without talking to each other, they agree
   "allowFrom": ["your Discord user ID"],
   "categoryName": "Claude Sessions",
   "consoleChannelName": "claude-console",
-  "archiveForumName": "claude-archive",
   "archiveCategoryName": "Claude Sessions (ended)",
   "kinds": ["interactive"],
   "backlog": 15,
@@ -204,14 +193,12 @@ Every computer receives every command. Without talking to each other, they agree
 | Key | Meaning |
 |---|---|
 | `language` | `"en"` (default) or `"zh-TW"`. Slash command descriptions follow each user's Discord language regardless |
-| `guildId` | Server to use. Auto-detected when the bot is in exactly one |
+| `guildId` | Server this computer uses; setup asks. Each computer needs its own |
 | `allowFrom` | Owners: Discord user IDs with full control of every session. Others only get what a session is [shared](#sharing) with them |
-| `machine` | Experimental: this computer's name when several computers share one bot, see [Several computers](#several-computers-one-bot-experimental) |
 | `categoryName` | Category for session channels |
 | `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
-| `archiveForumName` | Forum for ended sessions, default `claude-archive` (`claude-已結束` in zh-TW); `""` moves channels to `archiveCategoryName` instead. If the forum can't be created, archiving falls back to the category and retries the forum hourly |
-| `archiveCategoryName` | Archive category when no forum is used; `""` leaves channels in place |
-| `deleteEndedAfterDays` | Delete archived sessions this many days after they ended; `0` keeps them. Unset: forum posts are kept, archived text channels (no forum) are deleted after 7 days |
+| `archiveCategoryName` | Category for ended sessions, default `Claude Sessions (ended)` (`Claude 已結束` in zh-TW); more are opened as `…-2`, `…-3` when it fills up. `""` leaves channels in place |
+| `deleteEndedAfterDays` | Also delete ended sessions' channels this many days after they ended. Unset or `0`: keep them until the server nears 500 channels |
 | `kinds` | Session kinds to mirror, from `~/.claude/sessions/<pid>.json` |
 | `backlog` | Past messages to post when a channel is created for an already-running session |
 | `showToolCalls` | Post one-line tool call summaries |
@@ -234,7 +221,7 @@ Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how 
 | Questions and plans | A `PreToolUse` hook (`src/ask-hook.ts`) on `AskUserQuestion` and `ExitPlanMode` asks the daemon, which posts components and returns the answer through `updatedInput.answers`, or allow / deny with feedback |
 | Interrupt | tmux `send-keys Escape` when the session runs in tmux; otherwise the channel server types Esc into Claude Code's terminal with `TIOCSTI`. If neither works, `src/stop-hook.ts` stops Claude before its next tool call |
 | New / resume | `tmux new-session` running `ccd`; startup dialogs (development channel, folder trust) are accepted automatically, and the last screen is posted if startup fails |
-| Deleted channels | A deleted live channel is recreated with a backlog. A deleted archive post or ended channel removes the session from the lists |
+| Deleted channels | A deleted live channel is recreated with a backlog. A deleted ended channel removes the session from the lists |
 
 ## Security
 

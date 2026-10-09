@@ -21,7 +21,6 @@ import {
   PermissionFlagsBits,
   type Guild,
   type TextChannel,
-  type ForumChannel,
   type AnyThreadChannel,
   type Message,
   type Interaction,
@@ -31,6 +30,7 @@ import {
   type MessageActionRowComponentBuilder,
   type RepliableInteraction,
   AttachmentBuilder,
+  MessageType,
   MessageFlags,
   ThreadAutoArchiveDuration,
   SlashCommandBuilder,
@@ -39,10 +39,10 @@ import {
 import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync, openSync, readSync, closeSync } from 'fs'
 import { basename, dirname, join, resolve } from 'path'
-import { loadConfig, STATE_DIR, SOCKET_PATH } from './config'
+import { loadConfig, readConfigFile, STATE_DIR, SOCKET_PATH, HOST_ID, otherClaim } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
@@ -55,10 +55,6 @@ import { keysToTmux, type Key } from './keys'
 
 const cfg = loadConfig()
 /** Experimental: several computers share this bot and guild; this one's name. */
-const MACHINE = cfg.machine
-const CATEGORY_NAME = MACHINE ? `${cfg.categoryName} · ${MACHINE}` : cfg.categoryName
-const CONSOLE_NAME = MACHINE && cfg.consoleChannelName ? `${cfg.consoleChannelName}-${MACHINE}` : cfg.consoleChannelName
-const FORUM_NAME = MACHINE && cfg.archiveForumName ? `${cfg.archiveForumName}-${MACHINE}` : cfg.archiveForumName
 const STATE_FILE = join(STATE_DIR, 'state.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const TICK_MS = 1500
@@ -74,7 +70,7 @@ type SessionState = {
   endedAt?: number
   /** The user's latest message (local or Discord), to tell sessions apart in the console. */
   lastPrompt?: string
-  /** Forum post this session was archived to (reused if it ends again after a resume). */
+  /** Forum post this session was archived to by older versions; its resume button still works. */
   archiveThreadId?: string
   /** People the owner shared this session with, by Discord user ID. */
   members?: Record<string, Role>
@@ -102,8 +98,6 @@ type Meeting = {
   conclusion?: string
   /** Sent to the session when it ended. */
   handedOff?: boolean
-  /** Already posted in the session's forum post. */
-  replayed?: boolean
 }
 
 /**
@@ -120,13 +114,15 @@ type State = {
   pausedAll?: boolean
   guildId?: string
   categoryId?: string
+  /** Archive categories for ended sessions, in order; a new one is opened when the last is full. */
+  archiveCategoryIds?: string[]
+  /** Before numbered archive categories. */
   archiveCategoryId?: string
   archiveForumId?: string
   consoleChannelId?: string
   consoleMessageId?: string
-  /** Multi-machine mode: the shared devices channel and this computer's entry in it. */
+  /** Left over from the removed multi-machine mode; deleted at startup. */
   devicesChannelId?: string
-  deviceMessageId?: string
   sessions: Record<string, SessionState>
 }
 
@@ -295,6 +291,7 @@ async function startTracking(s: LiveSession) {
       await post(t, [m.resumed(s.pid)])
     }
   } else {
+    await makeRoom(1)
     ch = await guild.channels.create({
       name: channelName(s),
       type: ChannelType.GuildText,
@@ -304,7 +301,7 @@ async function startTracking(s: LiveSession) {
     t.st.channelId = ch.id
     t.st.offset = 0
     await applyMembers(ch, t.st)
-    // Resumed after its channel was archived to the forum or deleted.
+    // Resumed after its channel was deleted (or archived to the forum by an older version).
     t.st.ended = false
     t.st.endedAt = undefined
     await post(t, [headerFor(t)])
@@ -344,225 +341,83 @@ async function endTracking(t: Tracked) {
   t.st.endedAt = Date.now()
   stateDirty = true
   tracked.delete(t.sessionId)
-  if (forumAvailable()) {
-    try {
-      await archiveToForum(t)
-      return
-    } catch (e: any) {
-      log('forum archive failed, moving the channel to the archive category instead:', e?.message ?? e)
-    }
-  }
   await archiveToCategory(t)
 }
 
-/** Without a forum (disabled or not available in this guild): move the channel to the archive category. */
+// ---- archive categories ----------------------------------------------------------
+//
+// Ended sessions keep their text channel (and its meeting threads) and move to an
+// archive category: "Claude Sessions (ended)", then "…-2", "…-3" as each fills up
+// (Discord allows 50 channels per category). Near the guild's 500-channel limit the
+// longest-ended sessions are deleted; their transcripts and meeting records stay on disk.
+
+const CATEGORY_MAX = 50
+const GUILD_MAX = 500
+/** Room kept free under the guild limit for new sessions and categories. */
+const GUILD_RESERVE = 10
+
+const archiveCategoryName = (n: number) => (n === 1 ? cfg.archiveCategoryName : `${cfg.archiveCategoryName}-${n}`)
+
+/** An archive category with room, opening the next one when all are full. */
+async function archiveCategory(): Promise<string> {
+  const ids = (state.archiveCategoryIds ??= state.archiveCategoryId ? [state.archiveCategoryId] : [])
+  state.archiveCategoryId = undefined
+  // Forget categories someone deleted.
+  for (let i = ids.length - 1; i >= 0; i--) if (guild.channels.cache.get(ids[i])?.type !== ChannelType.GuildCategory) ids.splice(i, 1)
+  for (const id of ids) {
+    const cat = guild.channels.cache.get(id)
+    if (cat?.type === ChannelType.GuildCategory && cat.children.cache.size < CATEGORY_MAX) return id
+  }
+  await makeRoom(1)
+  const id = await ensureCategory(archiveCategoryName(ids.length + 1), undefined)
+  ids.push(id)
+  stateDirty = true
+  return id
+}
+
+/** Ended sessions keep their channel; it moves to an archive category. */
 async function archiveToCategory(t: Tracked) {
   if (!cfg.archiveCategoryName) return
-  state.archiveCategoryId = await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId)
-  stateDirty = true
   const ch = await channelOf(t)
-  await ch?.setParent(state.archiveCategoryId, { lockPermissions: false }).catch(e => log('archive failed:', e?.message))
-}
-
-// ---- forum archive ------------------------------------------------------------
-
-/** When this guild last refused to create the forum; we retry after an hour (e.g. once Community is enabled). */
-let forumFailedAt = 0
-const forumAvailable = () => !!FORUM_NAME && Date.now() - forumFailedAt > 3_600_000
-
-/** With several computers, each has its own forum in its own category; one shared by all is someone else's or left over. */
-const isOwnForum = (c: { name: string; parentId: string | null }) =>
-  c.name === discordName(FORUM_NAME) && (!MACHINE || c.parentId === state.categoryId)
-
-async function archiveForum(): Promise<ForumChannel> {
-  const cached = state.archiveForumId ? guild.channels.cache.get(state.archiveForumId) : undefined
-  if (cached?.type === ChannelType.GuildForum && isOwnForum(cached)) return cached
-  const found = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && isOwnForum(c)) as ForumChannel | undefined
-  const forum =
-    found ??
-    (await guild.channels
-      .create({
-        name: FORUM_NAME,
-        type: ChannelType.GuildForum,
-        parent: state.categoryId,
-        topic: m.forumTopic,
-      })
-      .catch(e => {
-        forumFailedAt = Date.now()
-        throw new Error(`cannot create forum channel: ${e?.message ?? e}`)
-      }))
-  state.archiveForumId = forum.id
-  stateDirty = true
-  return forum
-}
-
-/** The whole conversation as Markdown, for the archive post. */
-function conversationMarkdown(st: SessionState): string | undefined {
-  if (!st.transcript) return undefined
-  const ctx: RenderContext = { toolNames: new Map(), showToolCalls: true }
-  const blocks = new JsonlTail(st.transcript).read().flatMap(o => renderRecord(o, ctx))
-  const md = blocks.map(b => b.text).join('\n\n')
-  // Discord's default upload limit is 10 MB; keep the most recent part.
-  return md.length > 9_000_000 ? m.olderOmitted + '\n\n' + md.slice(-9_000_000) : md
-}
-
-const resumeRow = (sessionId: string) =>
-  new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`resume:${sessionId}`).setLabel(m.resume).setEmoji('▶️').setStyle(ButtonStyle.Success),
-  )
-
-/**
- * Replace the session's text channel with a forum post: Discord can't move a
- * channel into a forum, so the post carries a summary and the full conversation.
- */
-async function archiveToForum(t: Tracked) {
-  const st = t.st
-  const ch = await channelOf(t)
-  if (ch) await queues.get(ch.id) // let pending mirror posts land first
-  const message = archiveMessage(t.sessionId, st)
-  let thread: AnyThreadChannel | undefined
-  if (st.archiveThreadId) {
-    // Ended again after a resume: add to the existing post.
-    const prev = await guild.channels.fetch(st.archiveThreadId).catch(() => null)
-    if (prev?.isThread()) {
-      thread = prev
-      if (thread.archived) await thread.setArchived(false).catch(() => {})
-      await thread.send(message)
-    }
-  }
-  thread ??= await createArchivePost(st, message)
-  // Meeting threads go with the channel; their records are copied into the post first.
-  await closeMeeting(t, { handoff: false })
-  await replayMeetings(t.sessionId, st, thread).catch(e => log('replaying meetings failed:', e?.message ?? e))
-  // Point the session at the post before deleting the channel, so channelDelete doesn't forget it.
-  st.archiveThreadId = st.channelId = thread.id
-  stateDirty = true
-  await ch?.delete('discord-sync: archived to forum').catch(e => log('delete after archive failed:', e?.message))
-}
-
-async function createArchivePost(st: SessionState, message: ReturnType<typeof archiveMessage>): Promise<AnyThreadChannel> {
-  const forum = await archiveForum()
-  const name = clip(st.title || st.lastPrompt || basename(st.cwd) || 'session', 100)
-  return forum.threads.create({ name, message })
-}
-
-/** A forum post's message: summary, resume button and the full conversation as .md. */
-function archiveMessage(sessionId: string, st: SessionState) {
-  const md = conversationMarkdown(st)
-  const content = [
-    `📂 \`${st.cwd}\``,
-    `🆔 \`${sessionId}\``,
-    m.endedAt(`<t:${Math.floor((st.endedAt ?? Date.now()) / 1000)}:f>`),
-    st.lastPrompt ? m.lastPrompt(clip(st.lastPrompt, 300)) : '',
-    m.resumeHint,
-  ]
-    .filter(Boolean)
-    .join('\n')
-  return {
-    content,
-    components: [resumeRow(sessionId)],
-    files: md ? [new AttachmentBuilder(Buffer.from(md, 'utf8'), { name: 'conversation.md' })] : [],
-  }
+  if (!ch) return
+  const parent = await archiveCategory()
+  await ch.setParent(parent, { lockPermissions: false }).catch(e => log('archive failed:', e?.message))
+  // Newest first.
+  await ch.setPosition(0, { relative: false }).catch(() => {})
 }
 
 /**
- * Multi-machine mode switched on: this computer's posts in the forum all
- * computers used to share are posted again in its own forum (posts can't be
- * moved) and the old ones deleted. Sessions whose transcript is gone stay put;
- * their resume button keeps working. The shared forum goes once it's empty.
+ * Keep `n` channels' worth of room under Discord's per-guild limit by deleting
+ * the channels of the sessions that ended longest ago, and archive categories
+ * (other than the first) left empty.
  */
-async function moveOwnPosts() {
-  if (!forumAvailable()) return
-  const own = await archiveForum()
-  const left = new Set<string>()
-  for (const st of Object.values(state.sessions)) {
-    if (!st.ended || !st.archiveThreadId || st.channelId !== st.archiveThreadId) continue
-    const post = await guild.channels.fetch(st.archiveThreadId).catch(() => null)
-    if (!post?.isThread() || !post.parentId || post.parentId === own.id) continue
-    const sid = Object.keys(state.sessions).find(k => state.sessions[k] === st)!
-    if (!st.transcript || !statSync(st.transcript, { throwIfNoEntry: false })) {
-      left.add(post.parentId)
-      continue
-    }
-    const moved = await createArchivePost(st, archiveMessage(sid, st))
-    for (const mt of st.meetings ?? []) mt.replayed = false
-    await replayMeetings(sid, st, moved).catch(e => log('replaying meetings failed:', e?.message ?? e))
-    st.archiveThreadId = st.channelId = moved.id
+async function makeRoom(n: number) {
+  const free = () => GUILD_MAX - GUILD_RESERVE - guild.channels.cache.filter(c => !c.isThread()).size
+  if (free() >= n) return
+  const oldest = Object.entries(state.sessions)
+    .filter(([sid, st]) => st.ended && !tracked.has(sid) && !creating.has(sid) && guild.channels.cache.get(st.channelId)?.type === ChannelType.GuildText)
+    .sort(([, a], [, b]) => (a.endedAt ?? 0) - (b.endedAt ?? 0))
+  const removed: string[] = []
+  for (const [sid, st] of oldest) {
+    if (free() >= n) break
+    const ch = guild.channels.cache.get(st.channelId)
+    await ch?.delete('discord-sync: making room under the 500-channel limit').catch(e => log(`delete #${ch?.name} failed:`, e?.message))
+    delete state.sessions[sid]
     stateDirty = true
-    await post.delete('discord-sync: moved to this computer\'s forum').catch(e => log('delete old post failed:', e?.message))
-    log(`moved archive of ${sid} to ${own.name}`)
+    removed.push(ch?.name ?? sid)
+    log(`deleted channel for ${sid} to make room (ended ${new Date(st.endedAt ?? 0).toISOString()})`)
   }
-  // The shared forum: delete it once no computer has posts there.
-  const shared = guild.channels.cache.find(c => c.type === ChannelType.GuildForum && c.name === discordName(cfg.archiveForumName)) as ForumChannel | undefined
-  if (!shared || shared.id === own.id || left.has(shared.id)) return
-  const active = await shared.threads.fetchActive().catch(() => undefined)
-  const archived = await shared.threads.fetchArchived({ limit: 1 }).catch(() => undefined)
-  if (active?.threads.size === 0 && archived?.threads.size === 0) {
-    await shared.delete('discord-sync: every computer has its own archive forum now').catch(() => {})
-    log(`deleted the empty shared forum ${shared.name}`)
-  }
-}
-
-/** Ended sessions still archived the old way, as a text channel. */
-function legacyArchived(): [string, SessionState][] {
-  return Object.entries(state.sessions).filter(
-    ([sid, st]) => st.ended && !tracked.has(sid) && guild.channels.cache.get(st.channelId)?.type === ChannelType.GuildText,
-  )
-}
-
-let migrating = false
-
-/**
- * Move old archived text channels into the forum. Sessions with no conversation
- * can't be resumed, so their channels are just deleted. The archive category is
- * removed once it's empty.
- */
-async function migrateToForum(r: Replier) {
-  if (!cfg.archiveForumName) return void (await r.reply(m.noForum))
-  if (migrating) return void (await r.reply(m.alreadyMigrating))
-  const items = legacyArchived()
-  if (!items.length) return void (await r.reply(m.nothingToMigrate))
-  migrating = true
-  try {
-    forumFailedAt = 0 // an explicit request: try again even if it failed recently
-    try {
-      await archiveForum()
-    } catch (e: any) {
-      return void (await r.reply(m.forumStillUnavailable(String(e?.message ?? e))))
-    }
-    const status = await r.reply(m.migrating(0, items.length))
-    let moved = 0
-    let dropped = 0
-    const failed: string[] = []
-    for (const [sid, st] of items) {
-      const ch = guild.channels.cache.get(st.channelId)
-      try {
-        if (!st.transcript) {
-          delete state.sessions[sid]
-          stateDirty = true
-          await ch?.delete('discord-sync: empty session')
-          dropped++
-        } else {
-          await archiveToForum({ sessionId: sid, st, ctx: { toolNames: new Map(), showToolCalls: true }, lastTyping: 0 })
-          moved++
-        }
-      } catch (e: any) {
-        failed.push(`#${ch?.name ?? sid}：${e?.message ?? e}`)
-      }
-      await status.edit(m.migrating(moved + dropped + failed.length, items.length)).catch(() => {})
-    }
-    await Bun.sleep(1500) // let the channelDelete events update the category's children
-    const cat = state.archiveCategoryId ? guild.channels.cache.get(state.archiveCategoryId) : undefined
+  for (const id of (state.archiveCategoryIds ?? []).slice(1)) {
+    const cat = guild.channels.cache.get(id)
     if (cat?.type === ChannelType.GuildCategory && cat.children.cache.size === 0) {
-      await cat.delete('discord-sync: archive category is empty').catch(() => {})
-      state.archiveCategoryId = undefined
+      await cat.delete('discord-sync: empty archive category').catch(() => {})
+      state.archiveCategoryIds = state.archiveCategoryIds!.filter(x => x !== id)
       stateDirty = true
     }
-    const lines = [m.migrated(moved, dropped)]
-    if (failed.length) lines.push(m.migrateFailed(failed.length), ...failed.slice(0, 10).map(f => `- ${clip(f, 150)}`))
-    await status.edit(clip(lines.join('\n'), 2000))
-  } finally {
-    migrating = false
+  }
+  if (removed.length) {
+    const con = await consoleChannel().catch(() => undefined)
+    await con?.send({ content: clip(m.madeRoom(removed.map(n => `#${n}`).join(', ')), 2000), allowedMentions: { parse: [] } }).catch(() => {})
   }
 }
 
@@ -585,6 +440,7 @@ async function onChannelGone(id: string) {
       return
     }
   }
+  state.archiveCategoryIds = state.archiveCategoryIds?.filter(x => x !== id)
   for (const [sid, st] of Object.entries(state.sessions)) {
     if (st.ended && (st.channelId === id || st.archiveThreadId === id)) {
       delete state.sessions[sid]
@@ -594,7 +450,7 @@ async function onChannelGone(id: string) {
     }
   }
   if (id === state.categoryId) {
-    state.categoryId = await ensureCategory(CATEGORY_NAME, undefined)
+    state.categoryId = await ensureCategory(cfg.categoryName, undefined)
     stateDirty = true
   }
 }
@@ -829,12 +685,7 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  if (MACHINE && !ownsChannel(msg.channelId, parentOf(msg.channelId))) {
-    // A ! command outside every computer's channels: one of them says where to use it.
-    if (/^!(new|stop|end|resume|migrate|sync|model|mode)\b/i.test(msg.content.trim()) && isNeutral(msg.channelId) && isLeader()) void msg.reply(m.whichDevice(onlineNames())).catch(() => {})
-    return
-  }
-  const cmd = /^!(new|stop|end|resume|migrate|sync|model|mode)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|sync|model|mode)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
     if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' ? 'chat' : 'owner')) {
@@ -923,7 +774,8 @@ client.on('messageCreate', async (msg: Message) => {
 })
 
 client.on('interactionCreate', async (i: Interaction) => {
-  if (MACHINE && !(await routeHere(i))) return
+  // One bot can serve several computers, each in its own guild: only this guild's interactions are ours.
+  if (!guild || i.guildId !== guild.id) return
   if (i.isAutocomplete() && i.commandName === 'new') {
     await i.respond(dirSuggestions(String(i.options.getFocused()))).catch(() => {})
     return
@@ -1546,7 +1398,7 @@ async function endSession(t: Tracked, r: Replier, peer: Socket | undefined) {
 
 // ---- commands: !text, /slash and the console share these --------------------
 
-const COMMANDS = ['new', 'stop', 'end', 'resume', 'migrate'] as const
+const COMMANDS = ['new', 'stop', 'end', 'resume'] as const
 type Command = (typeof COMMANDS)[number]
 
 /** Where a command's status messages go. `reply` returns a handle to edit that message later. */
@@ -1590,7 +1442,6 @@ function endedByChannel(channelId: string): [string, SessionState] | undefined {
 async function runCommand(r: Replier, channelId: string, cmd: Command, dir?: string, prompt?: string) {
   try {
     if (cmd === 'new') return await startNewSession(r, dir, prompt)
-    if (cmd === 'migrate') return await migrateToForum(r)
     const t = trackedByChannel(channelId)
     if (cmd === 'resume') {
       if (t) return void (await r.reply(m.stillRunning))
@@ -1632,21 +1483,13 @@ const MODE_LABELS: Record<Mode, string> = {
   bypassPermissions: 'bypass permissions',
 }
 
-/** /new; with several computers its first option picks which one. */
-function newCommand() {
-  const b = described(new SlashCommandBuilder().setName('new'), 'new')
-  if (MACHINE) b.addStringOption(o => described(o.setName('device'), 'device').setRequired(true).setAutocomplete(true))
-  return b
-}
-
 const SLASH_COMMANDS = [
-  newCommand()
+  described(new SlashCommandBuilder().setName('new'), 'new')
     .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
     .addStringOption(o => described(o.setName('prompt'), 'prompt')),
   described(new SlashCommandBuilder().setName('stop'), 'stop'),
   described(new SlashCommandBuilder().setName('end'), 'end'),
   described(new SlashCommandBuilder().setName('resume'), 'resume'),
-  described(new SlashCommandBuilder().setName('migrate'), 'migrate'),
   described(new SlashCommandBuilder().setName('share'), 'share')
     .addUserOption(o => described(o.setName('user'), 'shareUser').setRequired(true))
     .addStringOption(o =>
@@ -1779,26 +1622,16 @@ function consoleView() {
       ? new ButtonBuilder().setCustomId('console:resumeall').setLabel(m.resumeAll).setEmoji('▶️').setStyle(ButtonStyle.Success)
       : new ButtonBuilder().setCustomId('console:pauseall').setLabel(m.pauseAll).setEmoji('⏸️').setStyle(ButtonStyle.Secondary),
   )
-  const legacy = forumAvailable() ? legacyArchived().length : 0
-  if (legacy) {
-    buttons.addComponents(
-      new ButtonBuilder().setCustomId('console:migrate').setLabel(m.migrateButton(legacy)).setEmoji('🗂️').setStyle(ButtonStyle.Secondary),
-    )
-  }
   components.push(buttons)
   return { content: clip(lines.join('\n'), 2000), components }
 }
 
 async function consoleChannel(): Promise<TextChannel | undefined> {
-  if (!CONSOLE_NAME) return undefined
+  if (!cfg.consoleChannelName) return undefined
   const cached = state.consoleChannelId ? guild.channels.cache.get(state.consoleChannelId) : undefined
-  if (cached?.type === ChannelType.GuildText) {
-    // Multi-machine mode switched on: give the console this computer's name.
-    if (MACHINE && cached.name !== discordName(CONSOLE_NAME)) await cached.setName(CONSOLE_NAME).catch(() => {})
-    return cached
-  }
+  if (cached?.type === ChannelType.GuildText) return cached
   const ch = await guild.channels.create({
-    name: CONSOLE_NAME,
+    name: cfg.consoleChannelName,
     type: ChannelType.GuildText,
     parent: state.categoryId,
     position: 0,
@@ -1859,10 +1692,6 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
   }
   await i.deferReply({ ephemeral: true })
   const r = interactionReplier(i, true)
-  if (i.isButton() && i.customId === 'console:migrate') {
-    await runCommand(r, '', 'migrate')
-    return
-  }
   if (i.isButton() && (i.customId === 'console:pauseall' || i.customId === 'console:resumeall')) {
     await setAllPaused(i.customId === 'console:pauseall', i.user.username)
     await r.reply(state.pausedAll ? m.allPaused : m.allResumed)
@@ -1893,12 +1722,12 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
 let cleanedAt = 0
 
 async function cleanupEnded() {
-  if (cfg.deleteEndedAfterDays === 0 || Date.now() - cleanedAt < 10 * 60_000) return
+  // By default ended sessions stay until the guild runs short of room (makeRoom).
+  const days = cfg.deleteEndedAfterDays
+  if (!days || Date.now() - cleanedAt < 10 * 60_000) return
   cleanedAt = Date.now()
   for (const [sid, st] of Object.entries(state.sessions)) {
-    // Forum posts take no room in the channel list, so by default they stay; archived text channels go after a week.
-    const days = cfg.deleteEndedAfterDays ?? (st.archiveThreadId && st.channelId === st.archiveThreadId ? 0 : 7)
-    if (!days || !st.ended || !st.endedAt || st.endedAt > Date.now() - days * 86_400_000 || tracked.has(sid) || creating.has(sid)) continue
+    if (!st.ended || !st.endedAt || st.endedAt > Date.now() - days * 86_400_000 || tracked.has(sid) || creating.has(sid)) continue
     const ch = await guild.channels.fetch(st.channelId).catch(() => null)
     await ch?.delete('discord-sync: session ended long ago').catch(e => log(`delete #${ch.name} failed:`, e?.message))
     delete state.sessions[sid]
@@ -2018,8 +1847,8 @@ function roleTag(userId: string, st: SessionState): string {
 //
 // Every message is written to disk as it happens (meetings/<session>/<id>.jsonl,
 // plus .md for Claude), so a meeting survives its thread. When it closes it is
-// rendered as one self-contained HTML page (meeting-html.ts), posted in the
-// thread and, when the session is archived to the forum, in the forum post.
+// rendered as one self-contained HTML page (meeting-html.ts) and posted, pinned,
+// in the session channel.
 
 const MEETINGS_DIR = join(STATE_DIR, 'meetings')
 const MEETING_IDLE_MS = 30 * 60_000
@@ -2285,22 +2114,45 @@ async function closeMeeting(t: Tracked, opts: { by?: Message; conclusion?: strin
     })
     t.st.lastPrompt = (mt.conclusion ?? m.meetingLastPrompt).replace(/\s+/g, ' ').slice(0, 200)
   }
-  if (!opts.by) {
-    // Session ended: if the thread outlives the channel's archiving, close it so nothing goes unrecorded.
-    const th = await meetingThread(mt)
-    await th?.setLocked(true).catch(() => {})
-    await th?.setArchived(true).catch(() => {})
-    return
+  const record = await postMeetingRecord(t, mt, html, entries.length).catch(e => void log('meeting record post failed:', e?.message ?? e))
+  const th = await meetingThread(mt)
+  if (opts.by) {
+    const reply = handoff ? m.meetingEnded(entries.length) : opts.handoff ? m.meetingSavedNoPeer(entries.length) : m.meetingSaved(entries.length)
+    await opts.by.reply({ content: record ? `${reply}\n${m.meetingRecordAt(record.url)}` : reply, allowedMentions: { parse: [] } }).catch(() => {})
   }
-  const th = opts.by.channel as AnyThreadChannel
-  const reply = handoff ? m.meetingEnded(entries.length) : opts.handoff ? m.meetingSavedNoPeer(entries.length) : m.meetingSaved(entries.length)
+  await th?.setLocked(true).catch(() => {})
+  await th?.setArchived(true).catch(() => {})
+}
+
+/**
+ * "Meeting recorded" in the session channel, with the HTML page attached and
+ * pinned, so the channel's pins list every meeting the session had.
+ */
+async function postMeetingRecord(t: Tracked, mt: Meeting, html: string | undefined, n: number): Promise<Message | undefined> {
+  const ch = await channelOf(t)
+  if (!ch) return undefined
+  const content = m.meetingRecorded(
+    mt.name ?? m.meetingThreadName(new Date(mt.startedAt).toISOString().slice(11, 16)),
+    `<t:${Math.floor(mt.startedAt / 1000)}:f>`,
+    n,
+    mt.handedOff ? m.htmlSentToClaude : m.htmlSavedOnly,
+    mt.threadId,
+    mt.conclusion ? clip(mt.conclusion, 1200) : undefined,
+  )
   const files = html ? [new AttachmentBuilder(html, { name: meetingHtmlName(mt) })] : []
-  await opts.by
-    .reply({ content: reply, files, allowedMentions: { parse: [] } })
-    .catch(() => opts.by!.reply({ content: reply, allowedMentions: { parse: [] } }).catch(() => {}))
-  await post(t, [handoff ? m.meetingEndedChannel(th.id, mt.conclusion ? clip(mt.conclusion, 1500) : undefined) : m.meetingSavedChannel(th.id)])
-  await th.setLocked(true).catch(() => {})
-  await th.setArchived(true).catch(() => {})
+  const sent = await enqueue(ch.id, () =>
+    ch.send({ content, files, allowedMentions: { parse: [] } }).catch(() => ch.send({ content, allowedMentions: { parse: [] } })),
+  )
+  const pinned = await sent.pin().then(
+    () => true,
+    e => void log('pinning the meeting record failed (the bot needs Pin Messages):', e?.message ?? e),
+  )
+  if (pinned) {
+    // Discord announces every pin; the record itself already says it all.
+    const after = await ch.messages.fetch({ after: sent.id, limit: 10 }).catch(() => undefined)
+    for (const x of after?.values() ?? []) if (x.type === MessageType.ChannelPinnedMessage && x.reference?.messageId === sent.id) await x.delete().catch(() => {})
+  }
+  return sent
 }
 
 /** Nudge once when a meeting has gone quiet; nothing is sent to Claude on its own. */
@@ -2346,23 +2198,6 @@ async function writeMeetingHtml(sessionId: string, mt: Meeting): Promise<string>
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, html)
   return path
-}
-
-/** Post each finished meeting into the session's forum post: one message with the HTML page attached. */
-async function replayMeetings(sessionId: string, st: SessionState, postThread: AnyThreadChannel) {
-  for (const mt of (st.meetings ?? []).filter(x => !x.replayed)) {
-    let html = meetingFile(sessionId, mt, 'html')
-    if (!statSync(html, { throwIfNoEntry: false })) html = await writeMeetingHtml(sessionId, mt)
-    const n = readMeetingEntries(sessionId, mt).length
-    const status = mt.handedOff ? m.htmlSentToClaude : m.htmlSavedOnly
-    await postThread.send({
-      content: m.meetingArchived(mt.name ?? 'meeting', `<t:${Math.floor(mt.startedAt / 1000)}:f>`, n, status),
-      files: [new AttachmentBuilder(html, { name: meetingHtmlName(mt) })],
-      allowedMentions: { parse: [] },
-    })
-    mt.replayed = true
-    stateDirty = true
-  }
 }
 
 // ---- pausing --------------------------------------------------------------------
@@ -2535,183 +2370,52 @@ function commandOutputSince(file: string, offset: number): string | undefined {
   return undefined
 }
 
-// ---- several computers, one bot (experimental) --------------------------------
+// ---- one computer per guild -------------------------------------------------------
 //
-// Every computer's daemon receives every message and interaction. Each one keeps
-// an entry (one message) in a shared devices channel, refreshed every minute, so
-// all of them know who is online. Then, without talking to each other:
-// - a computer handles what happens in its own channels;
-// - /new goes to the computer it names;
-// - the first online computer by name (the "leader") answers what belongs to
-//   nobody: the device list, an offline target, commands used elsewhere.
+// One bot can serve several computers as long as each uses its own guild: every
+// daemon receives every guild's events and keeps to its own. Two computers set to
+// the same guild would fight over its channels, so the console channel's topic
+// names the computer in charge and when it last checked in; a second daemon that
+// finds another, recently active computer there refuses to start.
 
-const DEVICES_CHANNEL = 'claude-devices'
-const BEAT_MS = 60_000
-const DEVICES_REFRESH_MS = 20_000
-const OFFLINE_AFTER_MS = 150_000
-const DEVICE_TAG_RE = /cds-device name=(\S+) category=(\d*) console=(\d*)/
+/** Topic edits are rate limited to 2 per 10 minutes per channel. */
+const CLAIM_EVERY_MS = 6 * 60_000
 
-type Device = { name: string; seen: number; offline: boolean; categoryId?: string; consoleId?: string; mine: boolean }
-let devices: Device[] = []
-let lastBeat = 0
-let warnedDuplicate = false
-
-/** Discord's form of a text channel name. */
-const discordName = (name: string) => name.toLowerCase().replace(/\s+/g, '-')
-
-/** The category a channel is in; for a thread or forum post, its parent channel's category. */
-function parentOf(channelId: string): string | undefined {
-  const ch = guild.channels.cache.get(channelId)
-  if (!ch) return undefined
-  if (ch.isThread()) return ch.parent?.parentId ?? undefined
-  return ch.parentId ?? undefined
-}
-
-/** The oldest channel by that name, so two computers that created one at once still meet in the same one. */
-async function devicesChannel(): Promise<TextChannel> {
-  const found = guild.channels.cache
-    .filter((c): c is TextChannel => c.type === ChannelType.GuildText && c.name === DEVICES_CHANNEL)
-    .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-    .first()
-  const ch =
-    found ??
-    (await guild.channels.create({
-      name: DEVICES_CHANNEL,
-      type: ChannelType.GuildText,
-      topic: m.devicesTopic,
-      permissionOverwrites: canManageRoles
-        ? [
-            { id: client.user!.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-            ...cfg.allowFrom.map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] })),
-            { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-          ]
-        : undefined,
-    }))
-  if (state.devicesChannelId !== ch.id) {
-    state.devicesChannelId = ch.id
-    state.deviceMessageId = undefined
-    stateDirty = true
+async function claimGuild() {
+  const ch = await consoleChannel()
+  if (!ch) return
+  const fresh = await ch.fetch().catch(() => ch)
+  const other = otherClaim(fresh.topic)
+  if (other) {
+    log(`another computer (${other.name ?? other.host}) is running discord-sync in ${guild.name}; each computer needs its own guild. Exiting.`)
+    await ch.send({ content: m.guildTaken(hostname()), allowedMentions: { parse: [] } }).catch(() => {})
+    process.exit(0)
   }
-  return ch
-}
-
-/** Write this computer's entry: name, last seen, and its category and console so others can tell its channels apart. */
-async function heartbeat(offline = false) {
-  const ch = await devicesChannel()
-  const content =
-    `${offline ? '🔴' : '🟢'} **${MACHINE}** · <t:${Math.floor(Date.now() / 1000)}:R>\n` +
-    `-# cds-device name=${encodeURIComponent(MACHINE!)} category=${state.categoryId ?? ''} console=${state.consoleChannelId ?? ''}`
-  lastBeat = Date.now()
-  if (state.deviceMessageId) {
-    const edited = await ch.messages.edit(state.deviceMessageId, { content }).then(
-      () => true,
-      () => false,
-    )
-    if (edited) return
-  }
-  const sent = await ch.send({ content, flags: MessageFlags.SuppressNotifications, allowedMentions: { parse: [] } })
-  state.deviceMessageId = sent.id
-  stateDirty = true
-}
-
-/** Re-read every computer's entry. "Last seen" is Discord's edit time, so clocks don't need to agree. */
-async function refreshDevices() {
-  const ch = await devicesChannel()
-  const byName = new Map<string, Device>()
-  for (const msg of (await ch.messages.fetch({ limit: 50 })).values()) {
-    if (msg.author.id !== client.user!.id) continue
-    const match = DEVICE_TAG_RE.exec(msg.content)
-    if (!match) continue
-    const mine = msg.id === state.deviceMessageId
-    const d: Device = {
-      name: decodeURIComponent(match[1]),
-      seen: mine ? Date.now() : (msg.editedTimestamp ?? msg.createdTimestamp),
-      offline: !mine && msg.content.startsWith('🔴'),
-      categoryId: match[2] || undefined,
-      consoleId: match[3] || undefined,
-      mine,
-    }
-    if (d.name === MACHINE && !mine && isOnline(d) && !warnedDuplicate) {
-      warnedDuplicate = true
-      log(`another computer is also called "${MACHINE}"; give each one its own "machine" name`)
-    }
-    const prev = byName.get(d.name)
-    if (!prev || d.mine || (!prev.mine && d.seen > prev.seen)) byName.set(d.name, d)
-  }
-  devices = [...byName.values()]
-}
-
-async function machineTick() {
-  if (Date.now() - lastBeat >= BEAT_MS) await heartbeat()
-  await refreshDevices()
-}
-
-const isOnline = (d: Device) => d.mine || (!d.offline && Date.now() - d.seen < OFFLINE_AFTER_MS)
-function onlineDevices(): Device[] {
-  const list = devices.filter(isOnline)
-  if (!list.some(d => d.mine)) list.push({ name: MACHINE!, seen: Date.now(), offline: false, mine: true })
-  return list.sort((a, b) => a.name.localeCompare(b.name))
-}
-const onlineNames = () => onlineDevices().map(d => d.name)
-const isLeader = () => onlineDevices()[0]?.name === MACHINE
-
-/** This computer's channel: one of its sessions (live or archived), its console, or anything in its category. */
-function ownsChannel(channelId: string, parentId: string | undefined): boolean {
-  if (!MACHINE) return true
-  return !!sessionByChannel(channelId) || channelId === state.consoleChannelId || (!!parentId && parentId === state.categoryId)
-}
-
-/** Which computer a channel belongs to, as far as the devices channel tells. */
-function channelOwner(channelId: string): string | undefined {
-  const parentId = parentOf(channelId)
-  if (ownsChannel(channelId, parentId)) return MACHINE
-  return devices.find(d => !d.mine && (d.consoleId === channelId || (!!parentId && d.categoryId === parentId)))?.name
+  const topic = `${m.consoleTopic}\n-# cds-host=${HOST_ID} seen=${Math.floor(Date.now() / 1000)} (${hostname().replace(/[()]/g, '')})`
+  await fresh.setTopic(clip(topic, 1024)).catch(e => log('console topic update failed:', e?.message ?? e))
 }
 
 /**
- * Belongs to no computer for sure. Threads nobody claims and the shared
- * archive are excluded: posts left in the forum computers used to share belong
- * to whichever computer ran them, and only that one knows.
+ * Coming from the removed multi-machine mode: drop this computer's entry in the
+ * devices channel (and the channel once no entries are left), and give the
+ * session category and console their plain names again.
  */
-function isNeutral(channelId: string): boolean {
-  const ch = guild.channels.cache.get(channelId)
-  if (!ch || ch.isThread() || channelOwner(channelId)) return false
-  const parentId = parentOf(channelId)
-  return channelId !== state.archiveForumId && (!parentId || parentId !== state.archiveCategoryId)
-}
-
-function deviceChoices(typed: string, here: string | undefined): { name: string; value: string }[] {
-  const online = new Set(onlineNames())
-  return devices
-    .map(d => d.name)
-    .concat(online.has(MACHINE!) ? [] : [MACHINE!])
-    .filter((n, i, all) => all.indexOf(n) === i && n.toLowerCase().includes(typed.toLowerCase()))
-    // The computer whose channel this is first, then online ones.
-    .sort((a, b) => Number(b === here) - Number(a === here) || Number(online.has(b)) - Number(online.has(a)) || a.localeCompare(b))
-    .slice(0, 25)
-    .map(n => ({ name: clip(online.has(n) ? `🟢 ${n}` : m.deviceOfflineChoice(n), 100), value: n }))
-}
-
-/** Whether this computer should handle `i`. Answers for the leader what belongs to nobody. */
-async function routeHere(i: Interaction): Promise<boolean> {
-  const channelId = i.channelId ?? ''
-  if ((i.isAutocomplete() || i.isChatInputCommand()) && i.commandName === 'new') {
-    if (i.isAutocomplete() && i.options.getFocused(true).name === 'device') {
-      if (isLeader()) await i.respond(deviceChoices(String(i.options.getFocused()), channelOwner(channelId))).catch(() => {})
-      return false
+async function leaveMultiMachineMode() {
+  if (state.devicesChannelId) {
+    const ch = guild.channels.cache.get(state.devicesChannelId)
+    if (ch?.type === ChannelType.GuildText) {
+      const msgs = await ch.messages.fetch({ limit: 50 }).catch(() => undefined)
+      for (const msg of msgs?.values() ?? []) if (msg.author.id === client.user!.id && /cds-device name=/.test(msg.content)) await msg.delete().catch(() => {})
+      const left = await ch.messages.fetch({ limit: 1 }).catch(() => undefined)
+      if (left?.size === 0) await ch.delete('discord-sync: multi-machine mode removed').catch(() => {})
     }
-    const device = (i.isAutocomplete() ? String(i.options.get('device')?.value ?? '') : (i.options.getString('device') ?? '')).trim()
-    const target = device || channelOwner(channelId)
-    if (target === MACHINE) return true
-    if (!isLeader() || (target && onlineNames().includes(target))) return false
-    const text = target ? m.deviceOffline(target, onlineNames()) : m.pickDevice
-    if (i.isAutocomplete()) await i.respond([{ name: clip(text, 100), value: '-' }]).catch(() => {})
-    else await i.reply({ content: text, ephemeral: true }).catch(() => {})
-    return false
+    state.devicesChannelId = undefined
+    stateDirty = true
   }
-  if (ownsChannel(channelId, parentOf(channelId))) return true
-  if (i.isRepliable() && isNeutral(channelId) && isLeader()) await i.reply({ content: m.whichDevice(onlineNames()), ephemeral: true }).catch(() => {})
-  return false
+  const cat = state.categoryId ? guild.channels.cache.get(state.categoryId) : undefined
+  if (cat && cat.name !== cfg.categoryName) await cat.setName(cfg.categoryName).catch(() => {})
+  const con = state.consoleChannelId ? guild.channels.cache.get(state.consoleChannelId) : undefined
+  if (con && cfg.consoleChannelName && con.name !== cfg.consoleChannelName.toLowerCase().replace(/\s+/g, '-')) await con.setName(cfg.consoleChannelName).catch(() => {})
 }
 
 // ---- channel-server connections -------------------------------------------
@@ -2835,24 +2539,19 @@ client.once('clientReady', async c => {
     process.exit(1)
   }
   if (!cfg.allowFrom.length) log('warning: allowFrom is empty, nobody can talk to sessions from Discord')
+  const file = readConfigFile() as Record<string, unknown>
+  if (file.machine) log('note: "machine" in config.json is no longer used; give each computer its own guild instead')
+  if (file.archiveForumName) log('note: "archiveForumName" in config.json is no longer used; ended sessions move to the archive category')
   if (state.guildId !== guild.id) {
     // Different guild than last time: old channel mappings are meaningless.
     state.guildId = guild.id
     state.categoryId = state.archiveCategoryId = undefined
     state.sessions = {}
   }
-  if (MACHINE && state.categoryId && guild.channels.cache.get(state.categoryId)?.name !== CATEGORY_NAME) {
-    // Multi-machine mode switched on: move this computer's channels to its own category.
-    state.categoryId = await ensureCategory(CATEGORY_NAME, undefined)
-    for (const id of [state.consoleChannelId, ...Object.values(state.sessions).filter(st => !st.ended).map(st => st.channelId)]) {
-      const ch = id ? guild.channels.cache.get(id) : undefined
-      if (ch?.type === ChannelType.GuildText) await ch.setParent(state.categoryId, { lockPermissions: false }).catch(() => {})
-    }
-  }
-  state.categoryId = await ensureCategory(CATEGORY_NAME, state.categoryId)
-  // In forum mode the archive category is only created if archiving falls back to it.
-  state.archiveCategoryId =
-    cfg.archiveCategoryName && !cfg.archiveForumName ? await ensureCategory(cfg.archiveCategoryName, state.archiveCategoryId) : state.archiveCategoryId
+  state.categoryId = await ensureCategory(cfg.categoryName, state.categoryId)
+  await leaveMultiMachineMode().catch(e => log('leaving multi-machine mode failed:', e?.message ?? e))
+  await claimGuild()
+  setInterval(() => void claimGuild().catch(e => log('guild claim failed:', e?.message ?? e)), CLAIM_EVERY_MS)
   // Meetings from before meeting threads: nothing to continue.
   for (const st of Object.values(state.sessions)) if (st.meeting && !st.meeting.threadId) delete st.meeting
   // Sessions archived before endedAt existed: start their cleanup clock now.
@@ -2872,12 +2571,6 @@ client.once('clientReady', async c => {
     .set(SLASH_COMMANDS.map(c => c.toJSON()))
     .catch(e => log(`slash commands not registered (${e?.message}); re-invite the bot with the applications.commands scope`))
   await lockDown()
-  if (MACHINE) {
-    await machineTick().catch(e => log('devices update failed:', e?.message ?? e))
-    setInterval(() => void machineTick().catch(e => log('devices update failed:', e?.message ?? e)), DEVICES_REFRESH_MS)
-    void moveOwnPosts().catch(e => log('moving forum posts failed:', e?.message ?? e))
-    log(`multi-machine mode: this is "${MACHINE}"`)
-  }
   log(`syncing into ${guild.name} (${guild.id})`)
   startIpc()
   setInterval(() => void tick(), TICK_MS)
@@ -2887,8 +2580,6 @@ client.once('clientReady', async c => {
 client.on('error', e => log('client error:', e.message))
 
 async function shutdown() {
-  // Tell the other computers right away instead of letting the entry go stale.
-  if (MACHINE && guild) await Promise.race([heartbeat(true).catch(() => {}), Bun.sleep(2000)])
   saveState()
   if (!IS_WIN) rmSync(SOCKET_PATH, { force: true })
   process.exit(0)

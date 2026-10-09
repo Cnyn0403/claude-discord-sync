@@ -27,6 +27,7 @@ client.once('clientReady', async c => {
       ManageChannels: PermissionFlagsBits.ManageChannels,
       ManageRoles: PermissionFlagsBits.ManageRoles,
       ManageThreads: PermissionFlagsBits.ManageThreads,
+      PinMessages: PermissionFlagsBits.PinMessages,
       SendMessages: PermissionFlagsBits.SendMessages,
       AddReactions: PermissionFlagsBits.AddReactions,
       AttachFiles: PermissionFlagsBits.AttachFiles,

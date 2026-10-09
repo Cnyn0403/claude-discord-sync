@@ -1,13 +1,15 @@
 {
   "language": "en",
-  "allowFrom": ["your Discord user ID"],
+  "allowFrom": [
+    "your Discord user ID"
+  ],
   "guildId": "123456789012345678",
   "categoryName": "Claude Sessions",
   "consoleChannelName": "claude-console",
-  "archiveForumName": "claude-archive",
   "archiveCategoryName": "Claude Sessions (ended)",
-  "deleteEndedAfterDays": 7,
-  "kinds": ["interactive"],
+  "kinds": [
+    "interactive"
+  ],
   "backlog": 15,
   "showToolCalls": true,
   "notifyMinBusySec": 15,

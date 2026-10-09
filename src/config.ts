@@ -1,5 +1,6 @@
 import { readFileSync, mkdirSync } from 'fs'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
+import { createHash } from 'crypto'
 import { join } from 'path'
 import { setLanguage, m, type Language } from './i18n'
 import { ipcPath } from './platform'
@@ -9,6 +10,23 @@ export const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions')
 export const PROJECTS_DIR = join(CLAUDE_DIR, 'projects')
 export const STATE_DIR = process.env.DISCORD_SYNC_STATE_DIR ?? join(CLAUDE_DIR, 'channels', 'discord-sync')
 export const SOCKET_PATH = ipcPath(STATE_DIR)
+
+/**
+ * One computer per guild: the daemon writes this computer's ID into its console
+ * channel's topic, with when it last checked in, so another computer can tell
+ * the guild is taken.
+ */
+export const HOST_ID = createHash('sha256').update(`${hostname()}\0${homedir()}`).digest('hex').slice(0, 12)
+export const CLAIM_RE = /cds-host=(\w+) seen=(\d+)(?: \(([^)]*)\))?/
+export const CLAIM_STALE_MS = 20 * 60_000
+
+/** The other computer running a guild, judging by a channel topic; undefined if none or it went quiet. */
+export function otherClaim(topic: string | null | undefined): { host: string; name?: string; seen: number } | undefined {
+  const match = CLAIM_RE.exec(topic ?? '')
+  if (!match || match[1] === HOST_ID) return undefined
+  const seen = Number(match[2]) * 1000
+  return Date.now() - seen < CLAIM_STALE_MS ? { host: match[1], name: match[3], seen } : undefined
+}
 
 // The official discord plugin's state dir; used as a fallback for the bot
 // token and the allowlist so a user who already set that up needs no config.
@@ -22,19 +40,8 @@ export type Config = {
   guildId?: string
   /** Discord user IDs allowed to talk to sessions and answer permission prompts. */
   allowFrom: string[]
-  /**
-   * Experimental: this computer's name when several computers share one bot and
-   * server. Each gets its own category and console, and /new asks which computer.
-   */
-  machine?: string
   categoryName: string
-  /**
-   * Ended sessions become a post in this forum channel (summary, full conversation
-   * as .md, resume button) and their text channel is deleted. Empty string = use
-   * archiveCategoryName instead.
-   */
-  archiveForumName: string
-  /** Without a forum: ended sessions are moved to this category. Empty string = leave them in place. */
+  /** Ended sessions move to this category (then "…-2", "…-3" as each fills up). Empty string = leave them in place. */
   archiveCategoryName: string
   /** Session kinds (from ~/.claude/sessions/<pid>.json) to mirror. */
   kinds: string[]
@@ -50,11 +57,7 @@ export type Config = {
   attachOver: number
   /** Channel listing every session with stop/end/resume menus. Empty string = no console. */
   consoleChannelName: string
-  /** Delete channels of sessions that ended this many days ago. 0 = keep forever. */
-  /**
-   * Delete archived sessions this many days after they ended; 0 = keep forever.
-   * Unset: forum posts are kept, archived text channels go after 7 days.
-   */
+  /** Delete ended sessions' channels this many days after they ended. Unset or 0: keep them until the server nears 500 channels. */
   deleteEndedAfterDays?: number
 }
 
@@ -110,10 +113,8 @@ export function loadConfig(): Config {
     language,
     guildId: file.guildId,
     allowFrom: file.allowFrom ?? officialAccess?.allowFrom ?? [],
-    machine: file.machine?.trim() || undefined,
     categoryName: file.categoryName ?? 'Claude Sessions',
-    archiveForumName: file.archiveForumName ?? m.archiveForumName,
-    archiveCategoryName: file.archiveCategoryName ?? 'Claude Sessions (ended)',
+    archiveCategoryName: file.archiveCategoryName ?? m.archiveCategoryName,
     kinds: file.kinds ?? ['interactive'],
     backlog: file.backlog ?? 15,
     showToolCalls: file.showToolCalls ?? true,

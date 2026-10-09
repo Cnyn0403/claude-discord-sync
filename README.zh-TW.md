@@ -15,7 +15,7 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
  │   #claude-控制台       │   │  ├ 監看 ~/.claude/sessions/*.json            │
  │   #proj-15ab  ◀────────┼───┤  ├ 讀取 transcript JSONL → 貼到頻道          │
  │   #web-ffe3            │   │  └ Unix socket ◀──┐                          │
- │   🗂️ 封存論壇          │   │                   │                          │
+ │ 📁 Claude 已結束       │   │                   │                          │
  └───────────────────────┘   │ channel-server.ts（每個 ccd session 一個）    │
                              │  └ MCP channel：Discord ⇄ Claude Code         │
                              │ ask-hook.ts / stop-hook.ts（ccd 掛的 hook）   │
@@ -31,8 +31,9 @@ Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` �
 - **完成通知：** Claude 做完一段較久的工作時會 @ 你。
 - **控制 session：** `/new`、`/stop`、`/end`、`/resume`（也可以用 `!new`、`!stop`…）。開新的或恢復的 session 會在背景的 tmux 裡執行，本機可以用 `tmux attach` 接手。
 - **控制台頻道：** 列出所有 session 的狀態，附「中斷 / 結束 / 恢復」選單和開新 session 的按鈕。
-- **論壇封存：** session 結束後會變成一篇論壇貼文，附完整對話和「恢復」按鈕。伺服器不能建立論壇時，會改用封存分類。
-- **自動清理：** 論壇貼文會永久保留；無法使用論壇時封存成的文字頻道，一週後刪除。兩者都可以調整。
+- **封存：** session 結束後保留原本的頻道（包括會議討論串），移到封存分類（`Claude 已結束`，每個分類放滿 50 個後依序開 `…-2`、`…-3`）。`/resume` 會把頻道移回來。
+- **自動清理：** 只有在伺服器快到 Discord 500 個頻道的上限時，才會刪除最久以前結束的 session 頻道（控制台會說明刪了哪些）。對話紀錄和會議紀錄仍保留在你的電腦上。也可以另外設定保留天數。
+- **多台電腦共用一個 bot：** 每台電腦各用一個伺服器，見[多台電腦](#多台電腦共用一個-bot)。
 
 ## 需求
 
@@ -115,8 +116,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/new <資料夾> [第一句話]` | 任何頻道 | 在 tmux 裡用 `ccd` 開新 session。資料夾欄位會提示子資料夾和最近用過的資料夾 |
 | `/stop` | session 頻道 | 中斷目前的工作（按 Esc） |
 | `/end` | session 頻道 | 工作中的話先中斷，再 `/exit` |
-| `/resume` | 封存貼文或已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，並建立新頻道 |
-| `/migrate` | 任何頻道 | 把用分類封存的舊頻道搬到論壇 |
+| `/resume` | 已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，頻道會從封存分類移回來 |
 | `/share @某人 <權限>` | session 頻道 | 把這個 session 分享給某人（見[分享](#分享)） |
 | `/unshare @某人` | session 頻道 | 取消分享 |
 | `/members` | session 頻道 | 列出誰可以存取這個 session |
@@ -138,7 +138,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | 核准權限請求和計畫 | ✅ | ✅ | | |
 | `/end`、`/share`、`/new`、`/resume`、控制台 | ✅ | | | |
 
-協作者傳給 Claude 的訊息會標註他們的身分。能對 Claude 說話的人就能叫它在你的電腦上做事，請只分享給你信任的人。分享設定在 `/resume` 之後仍然有效；封存到論壇的貼文只有擁有者看得到。
+協作者傳給 Claude 的訊息會標註他們的身分。能對 Claude 說話的人就能叫它在你的電腦上做事，請只分享給你信任的人。分享設定在 `/resume` 之後和封存期間都仍然有效。
 
 這個功能需要 bot 有「管理身分組」（Manage Roles）權限。沒有的話 daemon 會在 log 提示，頻道會維持全伺服器都看得到，`/share` 也無法使用。
 
@@ -150,7 +150,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 2. **問 Claude：**在討論串裡 tag bot 並寫上問題，會由一個唯讀的 session 分身回答。它知道到目前為止的對話，也能讀檔案（Read、Grep、Glob），但不能修改任何東西，問答也不會進到原本的 session。背後是每個問題都在背景開一個一次性的 `claude -p --resume <session> --fork-session --no-session-persistence`，並把目前為止的討論交給它：它永遠看得到 session 的最新狀態，不會在 `claude --resume` 清單留下多餘的 session，每個問題都會像一般請求一樣計費。
 3. **結束：**`@bot end`，後面可以接結論（「@bot end 就用方案 A」）。討論串會被關閉，Claude 會收到整段討論的 Markdown 檔（誰說了什麼、各自的角色、分身的回答，附件會下載到本機），加上結論。沒寫結論的話，Claude 會整理討論內容並提出下一步建議。`@bot save`（可以接結論）則是關閉討論串、只保存紀錄，不交給 Claude。
 
-**會議紀錄：**每則訊息都會即時寫進 `~/.claude/channels/discord-sync/meetings/<session-id>/<討論串-id>.jsonl`（另外有一份 `.md`，交給 Claude 的就是它），所以就算討論串被刪掉、或會議沒有正式結束，紀錄都還在。會議結束時，會整理成**一個獨立的 HTML 網頁**，排版像 Discord：有頭像、名稱、時間，Markdown（含程式碼區塊和表格）和圖片都正確顯示，所有內容都包在檔案裡，不需要網路就能用瀏覽器打開。這個網頁會附在討論串的結束訊息上；session 結束、歸檔到論壇時，每場會議也會在論壇貼文裡各發一則訊息並附上網頁（討論串本身會跟著被刪掉的頻道一起消失）。session 結束時還沒結束的會議只會保存，不會交給 Claude。
+**會議紀錄：**每則訊息都會即時寫進 `~/.claude/channels/discord-sync/meetings/<session-id>/<討論串-id>.jsonl`（另外有一份 `.md`，交給 Claude 的就是它），所以就算討論串被刪掉、或會議沒有正式結束，紀錄都還在。會議結束時，session 頻道會出現一則**「會議已紀錄」**並釘選，附上整理好的**獨立 HTML 網頁**：排版像 Discord，有頭像、名稱、時間，Markdown（含程式碼區塊和表格）和圖片都正確顯示，所有內容都包在檔案裡，不需要網路就能用瀏覽器打開。所以頻道的釘選訊息就是這個 session 開過的所有會議。session 結束時還沒結束的會議會保存並紀錄，但不會交給 Claude。釘選需要「釘選訊息」（Pin Messages）權限；沒有的話會照樣發出紀錄，只是不釘選。
 
 只有看得到 session 頻道的人才能加入（用 `/share` 分享）。會議 30 分鐘沒人說話時，bot 會提醒一次；它不會自己把會議交給 Claude。同時 tag 人和 bot 的訊息會當成一般訊息交給 Claude，不會開會議。
 
@@ -163,21 +163,11 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 
 暫停期間，這個 session 的內容都不會貼到 Discord（連控制台上的標題都不會更新），選擇題、計畫和權限請求都在終端機回答，從 Discord 傳的訊息也不會送給 Claude。恢復時**不會**補貼暫停期間的內容，只會顯示有幾則訊息沒有同步。
 
-## 多台電腦共用一個 bot（實驗性）
+## 多台電腦共用一個 bot
 
-預設是一台電腦用一個 bot。若要讓多台電腦共用同一個 bot 和伺服器，請在每台電腦的 `config.json` 設定名稱：
+同一個 bot 可以給好幾台電腦用，條件是**每台電腦使用各自的伺服器**：把 bot 邀請到每台電腦各自的伺服器，並在那台電腦的設定（`claude-discord-sync setup`）裡選擇它。每個 daemon 都會收到所有伺服器的事件，但只處理自己的伺服器，所以電腦之間不需要互相協調。
 
-```json
-{ "machine": "home-server" }
-```
-
-共用 bot 的**每一台**電腦都要設定，而且名稱不能重複，設定後重啟各台的 daemon。之後每台電腦會：
-
-- 有自己的分類（`Claude Sessions · home-server`），裡面放自己的控制台（`claude-控制台-home-server`）、session 頻道和已結束論壇（`claude-已結束-home-server`）。原本的頻道會移過去，以前在共用論壇裡的貼文也會重新發到自己的論壇（共用論壇空了之後會刪除）；
-- 在共用的 `#claude-devices` 頻道保留一則訊息，每分鐘更新一次，讓各台電腦知道誰在線；
-- 只處理自己頻道裡的事。`/new` 的第一個選項是電腦（自動補全會列出來），只有被選到的那台會執行。
-
-每台電腦都會收到所有指令。它們不需要互相溝通，就能算出同一個「值班」電腦，也就是在線電腦中名稱排序最前面的那台。值班電腦負責回應不屬於任何一台的請求：電腦清單、目標電腦離線，以及在任何電腦頻道以外使用的指令。電腦剛啟動或關閉的幾秒內，自動補全可能沒有反應，再試一次即可。
+設定時會標出已經有其他電腦在使用的伺服器。daemon 啟動時也會再檢查一次：控制台頻道的主題會記錄由哪台電腦負責這個伺服器、最後一次回報的時間（每幾分鐘更新一次）。如果發現 20 分鐘內有其他電腦在使用，daemon 會在控制台說明原因並結束。
 
 ## 設定
 
@@ -190,8 +180,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
   "allowFrom": ["你的 Discord user ID"],
   "categoryName": "Claude Sessions",
   "consoleChannelName": "claude-控制台",
-  "archiveForumName": "claude-已結束",
-  "archiveCategoryName": "Claude Sessions (ended)",
+  "archiveCategoryName": "Claude 已結束",
   "kinds": ["interactive"],
   "backlog": 15,
   "showToolCalls": true,
@@ -204,14 +193,12 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | 設定 | 說明 |
 |---|---|
 | `language` | `"en"`（預設）或 `"zh-TW"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
-| `guildId` | 要用的伺服器。bot 只在一個伺服器時會自動偵測 |
+| `guildId` | 這台電腦使用的伺服器，設定時會詢問。每台電腦需要各自的伺服器 |
 | `allowFrom` | 擁有者：對所有 session 有完整權限的 Discord user ID。其他人只能使用 session [分享](#分享)給他們的權限 |
-| `machine` | 實驗性：多台電腦共用一個 bot 時這台電腦的名稱，見[多台電腦](#多台電腦共用一個-bot實驗性) |
 | `categoryName` | session 頻道所在的分類 |
 | `consoleChannelName` | 控制台頻道名稱；設成 `""` 就不建立。預設是 `claude-控制台`（英文介面是 `claude-console`） |
-| `archiveForumName` | 封存用的論壇，預設是 `claude-已結束`（英文介面是 `claude-archive`）；設成 `""` 就改成把頻道移到 `archiveCategoryName`。論壇建立失敗時會自動改用分類，並每小時重試一次論壇 |
-| `archiveCategoryName` | 沒用論壇時的封存分類；設成 `""` 就讓頻道留在原地 |
-| `deleteEndedAfterDays` | session 結束幾天後刪除封存；設成 `0` 就永遠保留。沒設定時：論壇貼文永久保留，沒有論壇時封存成的文字頻道 7 天後刪除 |
+| `archiveCategoryName` | 已結束 session 的分類，預設是 `Claude 已結束`（英文介面是 `Claude Sessions (ended)`）；放滿時會依序開 `…-2`、`…-3`。設成 `""` 就讓頻道留在原地 |
+| `deleteEndedAfterDays` | 另外在 session 結束幾天後刪除它的頻道。沒設定或設成 `0`：保留到伺服器快滿 500 個頻道為止 |
 | `kinds` | 要同步的 session 類型，對應 `~/.claude/sessions/<pid>.json` 裡的 `kind` |
 | `backlog` | 為已經在跑的 session 建頻道時，最多補貼幾則舊訊息 |
 | `showToolCalls` | 是否貼出工具呼叫的一行摘要 |
@@ -234,7 +221,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | 選擇題和計畫 | `AskUserQuestion` 和 `ExitPlanMode` 的 `PreToolUse` hook（`src/ask-hook.ts`）會請 daemon 貼出選單或按鈕，再透過 `updatedInput.answers` 交回答案，或是帶著意見允許／拒絕 |
 | 中斷 | session 在 tmux 裡就用 `tmux send-keys Escape`；否則由 channel server 透過 `TIOCSTI` 把 Esc 塞進 Claude Code 的終端機。兩者都不行時，`src/stop-hook.ts` 會在 Claude 下一次使用工具前停下它 |
 | 開新 / 恢復 | 用 `tmux new-session` 執行 `ccd`，自動接受啟動時的確認畫面（development channel、信任資料夾）；啟動失敗時會把最後的畫面貼回來 |
-| 刪除頻道 | 執行中 session 的頻道被刪掉時，會自動重建並補貼最近的訊息。封存貼文或已結束的頻道被刪掉時，會把 session 從清單移除 |
+| 刪除頻道 | 執行中 session 的頻道被刪掉時，會自動重建並補貼最近的訊息。已結束的頻道被刪掉時，會把 session 從清單移除 |
 
 ## 安全性
 
