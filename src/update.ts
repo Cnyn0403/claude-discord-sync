@@ -4,7 +4,8 @@
  *
  *   claude-discord-sync update [--pre] [--version <tag>] [--force]
  */
-import { chmodSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, readdirSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { basename, dirname, join } from 'path'
 import { readConfigFile } from './config'
 import { IS_MAC, IS_WIN } from './platform'
 import { COMPILED } from './self'
@@ -87,9 +88,10 @@ async function main() {
 
   const exe = process.execPath
   if (IS_WIN) {
-    // A running .exe can't be overwritten, but it can be renamed out of the way.
-    rmSync(`${exe}.old`, { force: true })
-    renameSync(exe, `${exe}.old`)
+    // A running .exe can't be overwritten or deleted, but it can be renamed out of the way.
+    // An earlier .old may still be running (a ccd session's channel server), so each gets its own name.
+    removeOld()
+    renameSync(exe, `${exe}.old-${Date.now()}`)
     writeFileSync(exe, bin)
   } else {
     // rename() swaps the file atomically; running processes keep the old one.
@@ -108,10 +110,19 @@ async function main() {
   console.log(t.done(tag))
 }
 
-try {
-  // A previous Windows update leaves the old executable behind; it's free to delete by now.
-  if (IS_WIN && COMPILED) rmSync(`${process.execPath}.old`, { force: true })
-} catch {}
+/** Delete the executables earlier Windows updates renamed away; ones still running stay until next time. */
+function removeOld() {
+  const dir = dirname(process.execPath)
+  const prefix = `${basename(process.execPath)}.old`
+  for (const f of readdirSync(dir)) {
+    if (!f.startsWith(prefix)) continue
+    try {
+      rmSync(join(dir, f), { force: true })
+    } catch {}
+  }
+}
+
+if (IS_WIN && COMPILED) removeOld()
 try {
   await main()
   process.exit(0)

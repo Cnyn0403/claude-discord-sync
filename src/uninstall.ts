@@ -55,7 +55,7 @@ function removeProgram(): string {
   const dir = dirname(exe)
   if (IS_WIN) {
     removeFromUserPath()
-    const helper = spawn('cmd.exe', ['/d', '/c', `ping -n 3 127.0.0.1 >nul & del /f /q "${exe}" "${exe}.old" & rmdir "${dir}"`], {
+    const helper = spawn('cmd.exe', ['/d', '/c', `ping -n 3 127.0.0.1 >nul & del /f /q "${exe}" "${exe}.old*" & rmdir "${dir}"`], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
