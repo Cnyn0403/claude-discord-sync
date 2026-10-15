@@ -23,6 +23,8 @@ const loadKernel32 = () => dlopen('kernel32.dll', {
   WriteConsoleInputW: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
   GetConsoleScreenBufferInfo: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
   ReadConsoleOutputCharacterW: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+  GetConsoleMode: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+  SetConsoleMode: { args: [FFIType.u64, FFIType.u32], returns: FFIType.i32 },
 }).symbols
 const k32 = new Proxy({} as ReturnType<typeof loadKernel32>, { get: (_, k) => (k32Proxy() as any)[k] })
 
@@ -41,9 +43,39 @@ function open(name: 'CONIN$' | 'CONOUT$') {
   return h
 }
 
-function attach(pid: number) {
+function consoleMode(name: 'CONIN$' | 'CONOUT$'): number | undefined {
+  const h = open(name)
+  try {
+    const mode = new Uint32Array(1)
+    return k32.GetConsoleMode(h, ptr(mode)) ? mode[0] : undefined
+  } finally {
+    k32.CloseHandle(h)
+  }
+}
+
+/**
+ * Run `fn` attached to the console of `pid`, then leave it as it was found. Bun
+ * restores the console modes it saw at startup when it exits; still attached,
+ * that switched off the session's escape-sequence processing and its screen
+ * filled with raw codes. So put both modes back and detach before exiting.
+ */
+function withConsole<T>(pid: number, fn: () => T): T {
   k32.FreeConsole()
   if (!k32.AttachConsole(pid)) throw new Error(`AttachConsole(${pid}) failed (${k32.GetLastError()})`)
+  const names = ['CONIN$', 'CONOUT$'] as const
+  const modes = names.map(n => consoleMode(n))
+  try {
+    return fn()
+  } finally {
+    names.forEach((n, i) => {
+      const mode = modes[i]
+      if (mode === undefined || consoleMode(n) === mode) return
+      const h = open(n)
+      k32.SetConsoleMode(h, mode)
+      k32.CloseHandle(h)
+    })
+    k32.FreeConsole()
+  }
 }
 
 /** One INPUT_RECORD (20 bytes) holding a KEY_EVENT_RECORD. */
@@ -75,20 +107,24 @@ function records(keys: Key[]): Buffer {
 }
 
 function typeKeys(pid: number, keys: Key[]) {
-  attach(pid)
-  const h = open('CONIN$')
-  try {
-    const recs = records(keys)
-    const written = new Uint32Array(1)
-    if (!k32.WriteConsoleInputW(h, ptr(recs), recs.length / 20, ptr(written))) throw new Error(`WriteConsoleInputW failed (${k32.GetLastError()})`)
-  } finally {
-    k32.CloseHandle(h)
-  }
+  withConsole(pid, () => {
+    const h = open('CONIN$')
+    try {
+      const recs = records(keys)
+      const written = new Uint32Array(1)
+      if (!k32.WriteConsoleInputW(h, ptr(recs), recs.length / 20, ptr(written))) throw new Error(`WriteConsoleInputW failed (${k32.GetLastError()})`)
+    } finally {
+      k32.CloseHandle(h)
+    }
+  })
 }
 
 /** The visible part of the screen buffer, one line per row. */
 function screen(pid: number): string {
-  attach(pid)
+  return withConsole(pid, () => readScreen())
+}
+
+function readScreen(): string {
   const h = open('CONOUT$')
   try {
     // CONSOLE_SCREEN_BUFFER_INFO: dwSize, dwCursorPosition, wAttributes, srWindow{L,T,R,B}, dwMaximumWindowSize
