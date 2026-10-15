@@ -1175,11 +1175,16 @@ const STARTUP_PROMPTS: { re: RegExp; accept?: RegExp }[] = [
   { re: /Is this a project you created or one you trust/i, accept: /Yes, I trust this folder/i },
 ]
 
-/** Keys to press for a startup dialog: Enter if the cursor is on the accepting option, else Down. */
-function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down' {
+/**
+ * Key to press for a startup dialog: Enter if the cursor is on the accepting option, else Down.
+ * Undefined while the cursor isn't on screen yet, so Enter never lands on a "No, exit" default.
+ * The cursor is ❯, or > in a Windows console.
+ */
+function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down' | undefined {
   if (!accept) return 'Enter'
-  const cursor = screen.split('\n').find(l => /^\s*❯/.test(l))
-  return !cursor || accept.test(cursor) ? 'Enter' : 'Down'
+  const cursor = screen.split('\n').find(l => /^\s*[❯>]\s/.test(l))
+  if (!cursor) return undefined
+  return accept.test(cursor) ? 'Enter' : 'Down'
 }
 
 const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir())
@@ -1310,6 +1315,7 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
     const prompt = STARTUP_PROMPTS.find(p => p.re.test(screen) && !answered.has(p.re))
     if (prompt) {
       const key = downs < 5 ? dialogKey(screen, prompt.accept) : 'Enter'
+      if (!key) continue
       if (key === 'Enter') {
         answered.add(prompt.re)
         downs = 0
