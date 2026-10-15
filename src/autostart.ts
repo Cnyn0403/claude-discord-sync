@@ -117,6 +117,8 @@ ExecStart=${exec}
 Environment="PATH=${process.env.PATH ?? '/usr/bin:/bin'}"
 Restart=on-failure
 RestartSec=5
+# Sessions started from Discord run in a tmux server the daemon spawned; restarting the daemon must not kill them.
+KillMode=process
 
 [Install]
 WantedBy=default.target
