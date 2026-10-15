@@ -25,7 +25,7 @@ if (-not $expected -or $expected -ne $actual) {
 # Stop the daemon so it restarts on the new version. Sessions started with ccd keep running:
 # a running .exe can't be overwritten, but it can be renamed out of the way.
 Get-CimInstance Win32_Process -Filter "Name='claude-discord-sync.exe'" |
-  Where-Object { $_.CommandLine -match ' daemon' } |
+  Where-Object { $_.CommandLine -match '\bdaemon\b' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 # Old copies still running (a ccd session's channel server) can't be deleted, so each gets its own name.
 Get-ChildItem -Path $dir -Filter 'claude-discord-sync.exe.old*' | Remove-Item -Force -ErrorAction SilentlyContinue

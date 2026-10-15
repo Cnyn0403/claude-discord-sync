@@ -52,7 +52,7 @@ function stopWindowsDaemons() {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `Get-CimInstance Win32_Process -Filter "Name='${NAME}.exe'" | Where-Object { $_.CommandLine -match ' daemon' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
+      `Get-CimInstance Win32_Process -Filter "Name='${NAME}.exe'" | Where-Object { $_.CommandLine -match '\\bdaemon\\b' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
     ])
   } catch {}
 }
