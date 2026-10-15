@@ -10,6 +10,7 @@
 import { appendFileSync } from 'fs'
 import { format } from 'util'
 import { VERSION } from './version'
+import { COMPILED } from './self'
 
 const COMMANDS: Record<string, () => Promise<unknown>> = {
   setup: () => import('./setup'),
@@ -26,6 +27,10 @@ const COMMANDS: Record<string, () => Promise<unknown>> = {
   statusline: () => import('./statusline').then(s => s.run()),
   'win-console': () => import('./win-console'),
 }
+
+// Windows builds up to 0.3.0 wrote shims, hooks and the autostart entry as
+// `claude-discord-sync.exe B:\~BUN\root\cli.ts <sub>`; skip that stray path.
+if (COMPILED && /[\\/]cli\.ts$/.test(process.argv[2] ?? '')) process.argv.splice(2, 1)
 
 const sub = process.argv[2]
 if (sub === 'version' || sub === '--version' || sub === '-v') {

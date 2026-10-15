@@ -10,6 +10,7 @@ import { IS_MAC, IS_WIN } from './platform'
 import { COMPILED } from './self'
 import { VERSION } from './version'
 import { autostartInstalled, daemonRunning, installAutostart } from './autostart'
+import { installShortcut, isOurs } from './shortcut'
 
 const REPO = 'Cnyn0403/claude-discord-sync'
 
@@ -97,6 +98,7 @@ async function main() {
     renameSync(`${exe}.new`, exe)
   }
 
+  if (isOurs()) installShortcut()
   if (autostartInstalled()) {
     installAutostart()
     console.log(t.restarted)

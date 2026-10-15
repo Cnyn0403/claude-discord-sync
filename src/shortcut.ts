@@ -15,7 +15,7 @@ export const SHORTCUT_DIR = IS_WIN ? dirname(process.execPath) : join(homedir(),
 export const SHORTCUT = join(SHORTCUT_DIR, IS_WIN ? 'ccd.cmd' : 'ccd')
 
 /** Ours if it mentions us (shim) or links into this checkout. */
-function isOurs(): boolean {
+export function isOurs(): boolean {
   try {
     if (lstatSync(SHORTCUT).isSymbolicLink()) return true
     return readFileSync(SHORTCUT, 'utf8').includes(MARK)

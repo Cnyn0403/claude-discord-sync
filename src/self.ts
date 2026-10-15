@@ -4,8 +4,8 @@
  */
 import { join } from 'path'
 
-/** Compiled executables serve their modules from an embedded filesystem. */
-export const COMPILED = import.meta.url.includes('$bunfs') || import.meta.url.includes('~BUN')
+/** Compiled executables serve their modules from an embedded filesystem: /$bunfs/… or, on Windows, B:\\~BUN\\… */
+export const COMPILED = import.meta.path.includes('$bunfs') || import.meta.path.includes('~BUN')
 
 const CLI = join(import.meta.dir, 'cli.ts')
 
