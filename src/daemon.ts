@@ -1187,7 +1187,8 @@ function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down'
   return accept.test(cursor) ? 'Enter' : 'Down'
 }
 
-const cursorLine = (screen: string) => screen.split('\n').find(l => /^\s*[❯>]\s/.test(l))
+/** The dialog cursor's line; the last one, since a console may still show the frame before a redraw above it. */
+const cursorLine = (screen: string) => screen.split('\n').filter(l => /^\s*[❯>]\s/.test(l)).pop()
 
 const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir())
 
@@ -1300,9 +1301,6 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
 
   const answered = new Set<RegExp>()
   let downs = 0
-  // Spell Down as the escape sequence instead, once the arrow key fails to move the cursor.
-  let seq = false
-  let lastCursor: string | undefined
   const deadline = Date.now() + NEW_TIMEOUT_MS
   let screen = ''
   while (Date.now() < deadline) {
@@ -1323,15 +1321,11 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
       if (key === 'Enter') {
         answered.add(prompt.re)
         downs = 0
-        lastCursor = undefined
         await l.press('Enter')
       } else if (key === 'Down' && downs < 6) {
         // Never Enter on a declining option: if the cursor won't move, wait out the timeout and show the screen.
-        const cursor = cursorLine(screen)
-        if (downs > 0 && cursor === lastCursor) seq = !seq
-        lastCursor = cursor
         downs++
-        await l.press(seq ? { text: '\x1b[B' } : 'Down')
+        await l.press('Down')
       }
     }
   }
