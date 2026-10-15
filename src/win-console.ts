@@ -47,13 +47,13 @@ function attach(pid: number) {
 }
 
 /** One INPUT_RECORD (20 bytes) holding a KEY_EVENT_RECORD. */
-function keyRecord(down: boolean, vk: number, char: number, controlState = 0): Buffer {
+function keyRecord(down: boolean, vk: number, char: number, controlState: number, scan: number): Buffer {
   const b = Buffer.alloc(20)
   b.writeUInt16LE(KEY_EVENT, 0)
   b.writeInt32LE(down ? 1 : 0, 4) // bKeyDown
   b.writeUInt16LE(1, 8) // wRepeatCount
   b.writeUInt16LE(vk, 10) // wVirtualKeyCode
-  b.writeUInt16LE(0, 12) // wVirtualScanCode
+  b.writeUInt16LE(scan, 12) // wVirtualScanCode
   b.writeUInt16LE(char, 14) // uChar.UnicodeChar
   b.writeUInt32LE(controlState, 16) // dwControlKeyState
   return b
@@ -61,12 +61,14 @@ function keyRecord(down: boolean, vk: number, char: number, controlState = 0): B
 
 function records(keys: Key[]): Buffer {
   const out: Buffer[] = []
-  const press = (vk: number, char: number, state = 0) => out.push(keyRecord(true, vk, char, state), keyRecord(false, vk, char, state))
+  // Records as a real keyboard makes them, scan codes included: some readers ignore keys without one.
+  const press = (vk: number, char: number, scan = 0, state = 0) =>
+    out.push(keyRecord(true, vk, char, state, scan), keyRecord(false, vk, char, state, scan))
   for (const k of keys) {
-    if (k === 'Escape') press(0x1b, 0x1b)
-    else if (k === 'Enter') press(0x0d, 0x0d)
-    else if (k === 'Down') press(0x28, 0)
-    else if (k === 'BackTab') press(0x09, 0x09, 0x0010) // SHIFT_PRESSED
+    if (k === 'Escape') press(0x1b, 0x1b, 0x01)
+    else if (k === 'Enter') press(0x0d, 0x0d, 0x1c)
+    else if (k === 'Down') press(0x28, 0, 0x50, 0x0100) // ENHANCED_KEY: the arrow key, not numpad 2
+    else if (k === 'BackTab') press(0x09, 0x09, 0x0f, 0x0010) // SHIFT_PRESSED
     else for (const ch of k.text) press(0, ch.charCodeAt(0))
   }
   return Buffer.concat(out)

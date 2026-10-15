@@ -1182,10 +1182,12 @@ const STARTUP_PROMPTS: { re: RegExp; accept?: RegExp }[] = [
  */
 function dialogKey(screen: string, accept: RegExp | undefined): 'Enter' | 'Down' | undefined {
   if (!accept) return 'Enter'
-  const cursor = screen.split('\n').find(l => /^\s*[❯>]\s/.test(l))
+  const cursor = cursorLine(screen)
   if (!cursor) return undefined
   return accept.test(cursor) ? 'Enter' : 'Down'
 }
+
+const cursorLine = (screen: string) => screen.split('\n').find(l => /^\s*[❯>]\s/.test(l))
 
 const expandHome = (p: string) => p.replace(/^~(?=\/|$)/, homedir())
 
@@ -1219,7 +1221,7 @@ type Launch = {
   hint: string
   /** The current screen, plus `dead` (exit status) once the process is gone; undefined if it vanished. */
   poll(): Promise<{ screen: string; dead?: string } | undefined>
-  press(key: 'Enter' | 'Down'): Promise<unknown>
+  press(key: Key): Promise<unknown>
   owns(t: Tracked): boolean
   registered(): Promise<unknown>
 }
@@ -1248,7 +1250,7 @@ async function startInTmux(dir: string, args: string[]): Promise<Launch> {
         return undefined
       }
     },
-    press: key => run('tmux', ['send-keys', '-t', name, key]),
+    press: key => Promise.all(keysToTmux([key]).map(k => run('tmux', ['send-keys', '-t', name, ...k]))),
     owns: t => !!t.live && (t.live.pid === panePid || parentPid(t.live.pid) === panePid),
     registered: () => run('tmux', ['set-option', '-t', name, 'remain-on-exit', 'off']).catch(() => {}),
   }
@@ -1298,6 +1300,9 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
 
   const answered = new Set<RegExp>()
   let downs = 0
+  // Spell Down as the escape sequence instead, once the arrow key fails to move the cursor.
+  let seq = false
+  let lastCursor: string | undefined
   const deadline = Date.now() + NEW_TIMEOUT_MS
   let screen = ''
   while (Date.now() < deadline) {
@@ -1314,15 +1319,20 @@ async function launchSession(r: Replier, dir: string, args: string[], resumeId?:
     if (p.dead !== undefined) return void (await status.edit(m.startFailed(p.dead, screenBlock(screen))))
     const prompt = STARTUP_PROMPTS.find(p => p.re.test(screen) && !answered.has(p.re))
     if (prompt) {
-      const key = downs < 5 ? dialogKey(screen, prompt.accept) : 'Enter'
-      if (!key) continue
+      const key = dialogKey(screen, prompt.accept)
       if (key === 'Enter') {
         answered.add(prompt.re)
         downs = 0
-      } else {
+        lastCursor = undefined
+        await l.press('Enter')
+      } else if (key === 'Down' && downs < 6) {
+        // Never Enter on a declining option: if the cursor won't move, wait out the timeout and show the screen.
+        const cursor = cursorLine(screen)
+        if (downs > 0 && cursor === lastCursor) seq = !seq
+        lastCursor = cursor
         downs++
+        await l.press(seq ? { text: '\x1b[B' } : 'Down')
       }
-      await l.press(key)
     }
   }
   await status.edit(m.startTimeout(NEW_TIMEOUT_MS / 1000, screenBlock(screen)))
