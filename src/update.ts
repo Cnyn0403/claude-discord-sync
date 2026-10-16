@@ -13,8 +13,7 @@ import { COMPILED } from './self'
 import { VERSION } from './version'
 import { autostartInstalled, daemonRunning, installAutostart } from './autostart'
 import { installShortcut, isOurs } from './shortcut'
-
-const REPO = 'Cnyn0403/claude-discord-sync'
+import { REPO, gh } from './release'
 
 const text = {
   en: {
@@ -63,13 +62,6 @@ const args = process.argv.slice(2)
 const pre = args.includes('--pre')
 const force = args.includes('--force')
 const pinned = args.includes('--version') ? args[args.indexOf('--version') + 1] : undefined
-
-async function gh<T>(path: string): Promise<T | undefined> {
-  const res = await fetch(`https://api.github.com/repos/${REPO}${path}`, {
-    headers: { 'User-Agent': 'claude-discord-sync', Accept: 'application/vnd.github+json' },
-  })
-  return res.ok ? ((await res.json()) as T) : undefined
-}
 
 async function download(url: string): Promise<Buffer> {
   const res = await fetch(url)

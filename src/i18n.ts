@@ -234,6 +234,10 @@ const en = {
   meetingRecordAt: (url: string) => `The record is pinned in the session channel: ${url}`,
   madeRoom: (channels: string) => `🧹 The server was close to Discord's 500-channel limit, so the channels of the sessions that ended longest ago were deleted (their conversations are still on this computer): ${channels}`,
   guildTaken: (host: string) => `⚠️ **${host}** tried to start discord-sync in this server, but another computer is already using it. Each computer needs its own server; run setup on ${host} and pick a different one.`,
+  updateAvailable: (tag: string, current: string, url: string) => `🆕 **claude-discord-sync ${tag}** is out; this computer runs ${current}. What's new: <${url}>`,
+  updateHowBinary: 'To update, run `claude-discord-sync update` on this computer.',
+  updateHowSource: 'This computer runs from source: run `git pull && bun install` in the checkout, then restart the daemon.',
+  updateLine: (tag: string) => `🆕 Update available: **${tag}**`,
 } as const
 
 type Widen<T> = { [K in keyof T]: T[K] extends string ? string : T[K] }
@@ -452,6 +456,10 @@ const zhTW: Messages = {
   meetingRecordAt: url => `會議紀錄已釘選在 session 頻道：${url}`,
   madeRoom: channels => `🧹 伺服器快到 Discord 500 個頻道的上限，已刪除最久以前結束的 session 頻道（對話紀錄仍保留在這台電腦上）：${channels}`,
   guildTaken: host => `⚠️ **${host}** 想在這個伺服器啟動 discord-sync，但已經有另一台電腦在使用。每台電腦需要各自的伺服器，請在 ${host} 重新執行設定並選擇其他伺服器。`,
+  updateAvailable: (tag, current, url) => `🆕 **claude-discord-sync ${tag}** 已發布，這台電腦目前是 ${current}。更新內容：<${url}>`,
+  updateHowBinary: '在這台電腦上執行 `claude-discord-sync update` 即可更新。',
+  updateHowSource: '這台電腦是從原始碼執行的：在原始碼資料夾執行 `git pull && bun install`，再重新啟動 daemon。',
+  updateLine: tag => `🆕 有新版本：**${tag}**`,
 }
 
 const zhCN: Messages = {
@@ -665,6 +673,10 @@ const zhCN: Messages = {
   meetingRecordAt: url => `会议记录已置顶在 session 频道：${url}`,
   madeRoom: channels => `🧹 服务器快到 Discord 500 个频道的上限，已删除最早结束的 session 频道（对话记录仍保留在这台电脑上）：${channels}`,
   guildTaken: host => `⚠️ **${host}** 想在这个服务器上启动 discord-sync，但已经有另一台电脑在使用它。每台电脑需要各自的服务器，请在 ${host} 上重新运行设置并选择其他服务器。`,
+  updateAvailable: (tag, current, url) => `🆕 **claude-discord-sync ${tag}** 已发布，这台电脑当前是 ${current}。更新内容：<${url}>`,
+  updateHowBinary: '在这台电脑上运行 `claude-discord-sync update` 即可更新。',
+  updateHowSource: '这台电脑是从源码运行的：在源码文件夹运行 `git pull && bun install`，然后重启 daemon。',
+  updateLine: tag => `🆕 有新版本：**${tag}**`,
 }
 
 export const LANGUAGES = { en, 'zh-TW': zhTW, 'zh-CN': zhCN } as const satisfies Record<string, Messages>

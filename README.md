@@ -34,6 +34,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 - **Archive.** Ended sessions keep their channel, meeting threads included, and move to an archive category (`Claude Sessions (ended)`, then `…-2`, `…-3` as each fills its 50 channels). `/resume` moves a channel back.
 - **Cleanup.** Only when the server nears Discord's 500-channel limit are the channels of the sessions that ended longest ago deleted (the console says which); their transcripts and meeting records stay on your computer. A time limit is optional.
 - **Several computers, one bot.** Each computer uses its own server; see [Several computers](#several-computers-one-bot).
+- **Update notice.** When a new release is out, the console says so (see `updateCheck`); updating stays up to you.
 
 ## Requirements
 
@@ -229,6 +230,7 @@ Setup marks servers another computer is already using. A daemon also checks at s
 | `notifyMinBusySec` | Minimum turn length (seconds) for a done notification; `-1` disables |
 | `liveStatus` | While Claude works, keep one message at the bottom of the channel showing how long it has been working and which tool is running; `false` disables |
 | `attachOver` | Replies longer than this many characters are attached as `.md` |
+| `updateCheck` | Check GitHub once a day for a new release; the console announces it once with an @-mention and lists it at the top until you update. `false` disables |
 
 Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how long a question or plan waits on Discord before falling back to the terminal.
 

@@ -59,6 +59,8 @@ export type Config = {
   consoleChannelName: string
   /** Delete ended sessions' channels this many days after they ended. Unset or 0: keep them until the server nears 500 channels. */
   deleteEndedAfterDays?: number
+  /** Check GitHub once a day for a newer release and say so in the console. */
+  updateCheck: boolean
 }
 
 function readEnvFile(path: string): Record<string, string> {
@@ -123,5 +125,6 @@ export function loadConfig(): Config {
     attachOver: file.attachOver ?? 3800,
     consoleChannelName: file.consoleChannelName ?? m.consoleChannelName,
     deleteEndedAfterDays: file.deleteEndedAfterDays,
+    updateCheck: file.updateCheck ?? true,
   }
 }

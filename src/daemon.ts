@@ -52,6 +52,8 @@ import { readSnapshot, tokens, type PlanLimit } from './usage'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
 import { daemonRunning } from './autostart'
+import { latestRelease, isNewer } from './release'
+import { VERSION } from './version'
 import { keysToTmux, type Key } from './keys'
 
 const cfg = loadConfig()
@@ -131,6 +133,8 @@ type State = {
   consoleMessageId?: string
   /** Left over from the removed multi-machine mode; deleted at startup. */
   devicesChannelId?: string
+  /** The newest release the console has announced, so each is announced once. */
+  updateNotified?: string
   sessions: Record<string, SessionState>
 }
 
@@ -1676,7 +1680,7 @@ function consoleView() {
   const live = [...tracked.values()].filter(t => t.live)
   const ended = recentEnded(25)
   const planLine = planSummary(5)
-  const lines = ['## 🖥️ Claude Sessions', ...(planLine ? [`📊 ${planLine}`] : []), ...(state.pausedAll ? [m.allPausedBanner] : []), m.running]
+  const lines = ['## 🖥️ Claude Sessions', ...(planLine ? [`📊 ${planLine}`] : []), ...(newerRelease ? [m.updateLine(newerRelease.tag)] : []), ...(state.pausedAll ? [m.allPausedBanner] : []), m.running]
   if (!live.length) lines.push(m.none)
   for (const t of live) {
     const topic = sessionTopic(t.st)
@@ -2591,6 +2595,29 @@ async function setSync(r: Replier, channelId: string, on: boolean, by: string) {
   }
 }
 
+// ---- Update notice ------------------------------------------------------------
+// Once a day, ask GitHub for the latest release. A newer one is announced once
+// in the console (with an @-mention) and stays listed at the top until updated.
+
+const UPDATE_CHECK_EVERY_MS = 24 * 3_600_000
+let newerRelease: { tag: string; url: string } | undefined
+
+async function checkForUpdate() {
+  const latest = await latestRelease()
+  if (!latest) return
+  newerRelease = isNewer(latest.tag, VERSION) ? latest : undefined
+  if (!newerRelease || state.updateNotified === latest.tag) return
+  const ch = await consoleChannel()
+  if (!ch) return
+  const how = COMPILED ? m.updateHowBinary : m.updateHowSource
+  await ch.send({
+    content: `${mentionsOf(cfg.allowFrom)}\n${m.updateAvailable(latest.tag, VERSION, latest.url)}\n${how}`,
+    allowedMentions: { users: cfg.allowFrom },
+  })
+  state.updateNotified = latest.tag
+  stateDirty = true
+}
+
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
 const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode', 'rename', 'handoff', 'usage'] as const
@@ -2968,6 +2995,11 @@ client.once('clientReady', async c => {
   startIpc()
   setInterval(() => void tick(), TICK_MS)
   void tick()
+  if (cfg.updateCheck) {
+    const check = () => void checkForUpdate().catch(e => log('update check failed:', e?.message ?? e))
+    setTimeout(check, 60_000)
+    setInterval(check, UPDATE_CHECK_EVERY_MS)
+  }
 })
 
 client.on('error', e => log('client error:', e.message))
