@@ -38,7 +38,7 @@ Discord 上的文字支援英文、繁體中文和簡體中文，用設定裡的
 ## 需求
 
 - Linux、macOS 或 Windows 10/11（見[平台支援](#平台支援)）
-- 支援 channels 的 [Claude Code](https://claude.com/claude-code)
+- 支援 channels 的 [Claude Code](https://claude.com/claude-code)，並用 claude.ai 帳號或 Console API key 登入。Amazon Bedrock、Google Vertex AI、Microsoft Foundry 和第三方 API gateway 都不能用 channels；Team 和 Enterprise 組織需要管理員先開啟。沒有 channels 時 session 仍會同步，但在 Discord 上只能看
 - Linux 和 macOS 上的 `/new`、`/resume` 需要 tmux（`brew install tmux`、`apt install tmux`）
 - 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)），安裝精靈會一步一步帶你建立
 
@@ -47,7 +47,8 @@ Discord 上的文字支援英文、繁體中文和簡體中文，用設定裡的
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | 同步、對話、選擇題、計畫、權限、控制台、封存 | ✅ | ✅ | ✅ |
-| `/stop`、`/end` | tmux 或 `TIOCSTI` | tmux 或透過系統內建 Perl 的 `TIOCSTI` | 把按鍵送進 session 的主控台（**實驗性**） |
+| `/stop`、`/end`、`/model`、`/rename`（把按鍵送進 session） | tmux 或 `TIOCSTI` | tmux 或透過系統內建 Perl 的 `TIOCSTI` | 把按鍵送進 session 的主控台（**實驗性**） |
+| `/mode`（需要讀取 session 的畫面） | 只限 tmux | 只限 tmux | session 的主控台（**實驗性**） |
 | `/new`、`/resume` | tmux | tmux | 開一個新的主控台視窗（**實驗性**） |
 | 開機自動啟動 daemon（由 `setup` 設定） | systemd 使用者服務 | launchd agent | 啟動資料夾 |
 
@@ -67,11 +68,11 @@ curl -fsSL https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master
 irm https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.ps1 | iex
 ```
 
-安裝程式會下載你的平台專用的單一執行檔（不需要 Bun 或 Node），用 release 的 SHA-256 驗證檔案，再啟動安裝精靈 `claude-discord-sync setup`：
+安裝程式會下載你的平台專用的單一執行檔（不需要 Bun 或 Node），用 release 的 SHA-256 驗證檔案，再啟動安裝精靈 `claude-discord-sync setup`，先選語言，然後：
 
 1. 帶你建立 bot，然後輸入 token（輸入時不會顯示），並向 Discord 驗證，包括有沒有開啟 **Message Content Intent**。
 2. 顯示邀請連結，等 bot 加入你的伺服器。
-3. 詢問你的 Discord user ID（只有你能操作 session）和介面語言。
+3. 詢問你的 Discord user ID（只有你能操作 session）。
 4. 安裝 `ccd` 指令。
 5. 立刻啟動 daemon，並設定每次登入時自動啟動。
 
@@ -119,7 +120,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/resume` | 已結束的頻道 | 在 tmux 裡執行 `ccd --resume <id>`，頻道會從封存分類移回來 |
 | `/usage` | 任何頻道 | 只有你看得到。在 session 頻道：模型、上下文用量、token 和執行時間；其他頻道：所有進行中 session 的上下文用量。擁有者還會看到方案的本時段和本週用量 |
 | `/handoff [補充]` | session 頻道 | 產生交接表（見[交接](#交接)） |
-| `/rename <名稱>` | session 頻道 | 替 session 命名。頻道本來就會依 Claude Code 自動產生的標題命名為 `專案・標題`；用這個指令（或 Claude Code 本身的 `/rename`）取的名字優先。session 在 tmux 裡且閒置時，也會一併送給 Claude Code，讓 `claude --resume` 顯示同樣的名稱 |
+| `/rename <名稱>` | session 頻道 | 替 session 命名。頻道本來就會依 Claude Code 自動產生的標題命名為 `專案・標題`；用這個指令（或 Claude Code 本身的 `/rename`）取的名字優先。session 閒置時，也會像 `/model` 一樣輸入到 Claude Code，讓 `claude --resume` 顯示同樣的名稱 |
 | `/share @某人 <權限>` | session 頻道 | 把這個 session 分享給某人（見[分享](#分享)） |
 | `/unshare @某人` | session 頻道 | 取消分享 |
 | `/members` | session 頻道 | 列出誰可以存取這個 session |
@@ -128,7 +129,7 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/model <名稱>` | session 頻道 | 切換模型（`opus`、`sonnet`、`haiku`、`fable`、`default` 或模型 ID）。做法是在 session 裡輸入 `/model`，所以 Claude 必須是閒置狀態。跟在本機輸入一樣，也會變成新 session 的預設模型 |
 | `yes abcde` / `no abcde` | session 頻道 | 用代碼回答權限請求 |
 
-每個指令都可以改用 `!new`、`!stop`、`!sync off` 這種寫法。
+`!new`、`!stop`、`!end`、`!resume`、`!sync`、`!mode`、`!model`、`!rename`、`!handoff` 也可以直接打成一般訊息，例如 `!sync off`。`/usage`、`/share`、`/unshare`、`/members` 只能用斜線指令。
 
 ## 分享
 
@@ -136,10 +137,10 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 
 | | 擁有者 | 完整 | 協作 | 觀看 |
 |---|---|---|---|---|
-| 看到頻道和對話 | ✅ | ✅ | ✅ | ✅ |
-| 對 Claude 說話、回答選擇題、`/stop`、`/rename` | ✅ | ✅ | ✅ | |
+| 看到頻道和對話、`/members`、`/usage` | ✅ | ✅ | ✅ | ✅ |
+| 對 Claude 說話、回答選擇題、`/stop`、`/rename`、`/handoff` | ✅ | ✅ | ✅ | |
 | 核准權限請求和計畫 | ✅ | ✅ | | |
-| `/end`、`/share`、`/new`、`/resume`、控制台 | ✅ | | | |
+| `/end`、`/new`、`/resume`、`/share`、`/unshare`、`/sync`、`/mode`、`/model`、控制台 | ✅ | | | |
 
 協作者傳給 Claude 的訊息會標註他們的身分。能對 Claude 說話的人就能叫它在你的電腦上做事，請只分享給你信任的人。分享設定在 `/resume` 之後和封存期間都仍然有效。
 

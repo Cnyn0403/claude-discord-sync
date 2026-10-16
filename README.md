@@ -38,7 +38,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 ## Requirements
 
 - Linux, macOS, or Windows 10/11 (see [Platform support](#platform-support))
-- [Claude Code](https://claude.com/claude-code) with channels support
+- [Claude Code](https://claude.com/claude-code) with channels support, signed in with a claude.ai account or a Console API key. Channels aren't available on Amazon Bedrock, Google Vertex AI, Microsoft Foundry or through third-party API gateways, and Team and Enterprise organizations need an admin to turn them on. Without channels, sessions are still mirrored, but read-only on Discord
 - tmux for `/new` and `/resume` on Linux and macOS (`brew install tmux`, `apt install tmux`)
 - A Discord bot in a **private** server (see [Security](#security)); setup walks you through creating one
 
@@ -47,7 +47,8 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | Mirroring, chat, questions, plans, permissions, console, archive | ✅ | ✅ | ✅ |
-| `/stop`, `/end` | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
+| `/stop`, `/end`, `/model`, `/rename` (typed into the session) | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
+| `/mode` (reads the session's screen) | tmux only | tmux only | the session's console (**experimental**) |
 | `/new`, `/resume` | tmux | tmux | opens a new console window (**experimental**) |
 | Daemon at login (set up by `setup`) | systemd user unit | launchd agent | Startup folder |
 
@@ -67,11 +68,11 @@ curl -fsSL https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master
 irm https://raw.githubusercontent.com/Cnyn0403/claude-discord-sync/master/install.ps1 | iex
 ```
 
-The installer downloads a single executable for your platform (no Bun or Node needed), checks its SHA-256 against the release, and starts `claude-discord-sync setup`, which:
+The installer downloads a single executable for your platform (no Bun or Node needed), checks its SHA-256 against the release, and starts `claude-discord-sync setup`, which asks for the language and then:
 
 1. Walks you through creating the bot, then asks for its token (hidden while you type) and checks it with Discord, including **Message Content Intent**.
 2. Prints an invite link and waits for the bot to join your server.
-3. Asks for your Discord user ID (only you can control sessions) and the language.
+3. Asks for your Discord user ID (only you can control sessions).
 4. Installs the `ccd` command.
 5. Starts the daemon now and at every login.
 
@@ -119,7 +120,7 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/resume` | ended channel | `ccd --resume <id>` in tmux; the channel moves back from the archive |
 | `/usage` | anywhere | Only you see it. In a session channel: its model, context use, tokens and running time; elsewhere: every running session's context use. Owners also get the plan's session and weekly usage |
 | `/handoff [note]` | session channel | Write a handoff document (see [Handoff](#handoff)) |
-| `/rename <name>` | session channel | Name the session. Channels are named `project・title` from Claude Code's generated title anyway; a name given here (or with Claude Code's own `/rename`) takes precedence, and is also sent to Claude Code when the session is idle in tmux, so `claude --resume` shows it |
+| `/rename <name>` | session channel | Name the session. Channels are named `project・title` from Claude Code's generated title anyway; a name given here (or with Claude Code's own `/rename`) takes precedence, and is also typed into Claude Code when the session is idle (as with `/model`), so `claude --resume` shows it |
 | `/share @user <role>` | session channel | Give someone access to this session (see [Sharing](#sharing)) |
 | `/unshare @user` | session channel | Remove their access |
 | `/members` | session channel | List who can access this session |
@@ -128,7 +129,7 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/model <name>` | session channel | Switch the model (`opus`, `sonnet`, `haiku`, `fable`, `default` or a model ID). Types `/model` into the session, so Claude must be idle. Like typing it locally, it also becomes your default for new sessions |
 | `yes abcde` / `no abcde` | session channel | Answer a permission prompt by its code |
 
-Each command also works as `!new`, `!stop`, `!sync off`, and so on.
+`!new`, `!stop`, `!end`, `!resume`, `!sync`, `!mode`, `!model`, `!rename` and `!handoff` also work as plain messages, e.g. `!sync off`. `/usage`, `/share`, `/unshare` and `/members` are slash commands only.
 
 ## Sharing
 
@@ -136,10 +137,10 @@ Session channels are private: only the bot and the owners in `allowFrom` can see
 
 | | Owner | Full | Collaborate | View |
 |---|---|---|---|---|
-| See the channel and conversation | ✅ | ✅ | ✅ | ✅ |
-| Talk to Claude, answer questions, `/stop`, `/rename` | ✅ | ✅ | ✅ | |
+| See the channel and conversation, `/members`, `/usage` | ✅ | ✅ | ✅ | ✅ |
+| Talk to Claude, answer questions, `/stop`, `/rename`, `/handoff` | ✅ | ✅ | ✅ | |
 | Approve permission prompts and plans | ✅ | ✅ | | |
-| `/end`, `/share`, `/new`, `/resume`, the console | ✅ | | | |
+| `/end`, `/new`, `/resume`, `/share`, `/unshare`, `/sync`, `/mode`, `/model`, the console | ✅ | | | |
 
 Collaborators' messages reach Claude marked with their role. Anyone who can talk to Claude can make it act on your computer, so share with care. Access is kept across `/resume` and in the archive.
 
