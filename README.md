@@ -1,12 +1,12 @@
 # claude-discord-sync
 
-**English** · [繁體中文](README.zh-TW.md)
+**English** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
 
 Mirror every Claude Code session on your machine into its own Discord channel, and drive sessions from Discord: chat with Claude, answer its questions with select menus, approve plans and permissions with buttons, interrupt it, and start, end or resume sessions from your phone.
 
 > Unofficial community project, not affiliated with Anthropic. It relies on Claude Code's *channels* feature (research preview) and on Claude Code's internal session files, so a Claude Code update can break it.
 
-The Discord-facing text is available in English and Traditional Chinese (`"language"` in the config).
+The Discord-facing text is available in English, Traditional Chinese and Simplified Chinese (`"language"` in the config).
 
 ```
  Discord guild                        this machine
@@ -215,12 +215,12 @@ Setup marks servers another computer is already using. A daemon also checks at s
 
 | Key | Meaning |
 |---|---|
-| `language` | `"en"` (default) or `"zh-TW"`. Slash command descriptions follow each user's Discord language regardless |
+| `language` | `"en"` (default), `"zh-TW"` or `"zh-CN"`. Slash command descriptions follow each user's Discord language regardless |
 | `guildId` | Server this computer uses; setup asks. Each computer needs its own |
 | `allowFrom` | Owners: Discord user IDs with full control of every session. Others only get what a session is [shared](#sharing) with them |
 | `categoryName` | Category for session channels |
-| `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW) |
-| `archiveCategoryName` | Category for ended sessions, default `Claude Sessions (ended)` (`Claude 已結束` in zh-TW); more are opened as `…-2`, `…-3` when it fills up. `""` leaves channels in place |
+| `consoleChannelName` | Console channel name; `""` disables it. Defaults to `claude-console` (`claude-控制台` in zh-TW and zh-CN) |
+| `archiveCategoryName` | Category for ended sessions, default `Claude Sessions (ended)` (`Claude 已結束` in zh-TW, `Claude 已结束` in zh-CN); more are opened as `…-2`, `…-3` when it fills up. `""` leaves channels in place |
 | `deleteEndedAfterDays` | Also delete ended sessions' channels this many days after they ended. Unset or `0`: keep them until the server nears 500 channels |
 | `kinds` | Session kinds to mirror, from `~/.claude/sessions/<pid>.json` |
 | `backlog` | Past messages to post when a channel is created for an already-running session |

@@ -7,6 +7,7 @@
 import { chmodSync, readdirSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { readConfigFile } from './config'
+import { pickLanguage } from './i18n'
 import { IS_MAC, IS_WIN } from './platform'
 import { COMPILED } from './self'
 import { VERSION } from './version'
@@ -42,8 +43,21 @@ const text = {
     done: (v: string) => `✓ 已更新到 ${v}。用 ccd 開著的 session 重新啟動後就會換成新版。`,
     failed: (e: string) => `✗ 更新失敗：${e}`,
   },
+  'zh-CN': {
+    source: '这是从源码安装的版本，请用这条命令更新：git pull && bun install',
+    checking: '正在检查更新…',
+    noRelease: (pre: boolean) => `找不到任何版本。${pre ? '' : '（目前可能只有预发布版，可以加上 --pre 再试一次。）'}`,
+    upToDate: (v: string) => `已经是最新版（${v}）。`,
+    downloading: (from: string, to: string) => `正在从 ${from} 更新到 ${to}…`,
+    noAsset: (a: string) => `这个版本没有适用于当前平台的可执行文件（${a}）。`,
+    badChecksum: '校验和不匹配，没有安装这次更新。',
+    restarted: '✓ 已重启 daemon',
+    restartByHand: '⚠️  你手动启动的 daemon 还在运行旧版，请重启它。',
+    done: (v: string) => `✓ 已更新到 ${v}。用 ccd 打开的 session 重启后就会换成新版。`,
+    failed: (e: string) => `✗ 更新失败：${e}`,
+  },
 }
-const t = text[readConfigFile().language === 'zh-TW' ? 'zh-TW' : 'en']
+const t = text[pickLanguage(readConfigFile().language)]
 
 const args = process.argv.slice(2)
 const pre = args.includes('--pre')

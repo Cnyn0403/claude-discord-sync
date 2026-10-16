@@ -1550,16 +1550,19 @@ async function runCommand(r: Replier, channelId: string, cmd: Command, dir?: str
   }
 }
 
-/** English description plus a zh-TW localization; Discord shows each user their own language. */
+/** English description plus zh-TW and zh-CN localizations; Discord shows each user their own language. */
 const described = <T extends { setDescription(d: string): T; setDescriptionLocalizations(l: Record<string, string>): T }>(
   b: T,
   key: keyof typeof SLASH_DESCRIPTIONS,
-) => b.setDescription(SLASH_DESCRIPTIONS[key].en).setDescriptionLocalizations({ 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'] })
+) =>
+  b
+    .setDescription(SLASH_DESCRIPTIONS[key].en)
+    .setDescriptionLocalizations({ 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'], 'zh-CN': SLASH_DESCRIPTIONS[key]['zh-CN'] })
 
-/** A slash command choice named in English with a zh-TW localization. */
+/** A slash command choice named in English with zh-TW and zh-CN localizations. */
 const choice = (value: string, key: keyof typeof SLASH_DESCRIPTIONS) => ({
   name: SLASH_DESCRIPTIONS[key].en,
-  name_localizations: { 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'] },
+  name_localizations: { 'zh-TW': SLASH_DESCRIPTIONS[key]['zh-TW'], 'zh-CN': SLASH_DESCRIPTIONS[key]['zh-CN'] },
   value,
 })
 

@@ -10,6 +10,7 @@ import { IS_WIN, hasTmux } from './platform'
 import { installShortcut, shortcutOnPath, addToUserPath, SHORTCUT, SHORTCUT_DIR } from './shortcut'
 import { installAutostart, autostartInstalled, daemonRunning, logHint } from './autostart'
 import { ask, confirm as confirmYN, askHidden } from './prompt'
+import { pickLanguage } from './i18n'
 
 const text = {
   en: {
@@ -114,6 +115,57 @@ const text = {
       '\n隨時可以用這個指令檢查：claude-discord-sync doctor',
     ].join('\n'),
   },
+  'zh-CN': {
+    welcome: '\nclaude-discord-sync 安装设置\n',
+    noClaude: '⚠️  找不到 `claude` 命令，请先安装 Claude Code：https://claude.com/claude-code',
+    noTmux: '⚠️  没有安装 tmux，无法从 Discord 用 /new、/resume 开 session（macOS：`brew install tmux`，Linux：`apt install tmux`）。',
+    step: (n: number, title: string) => `\n[${n}/5] ${title}`,
+    tokenTitle: 'Discord bot',
+    keepToken: (name: string) => `找到了 bot“${name}”的 token，要继续使用吗？`,
+    botGuide: [
+      '创建 bot（只需要做一次）：',
+      '  1. 打开 https://discord.com/developers/applications，点“New Application”。',
+      '  2. 进入“Bot”页面，点“Reset Token”并复制 token。',
+      '  3. 在同一页面开启“Message Content Intent”并保存。',
+    ].join('\n'),
+    askToken: '粘贴 bot token（输入时不会显示）：',
+    badToken: '✗ Discord 不接受这个 token，请再试一次。',
+    botOk: (name: string) => `✓ 已登录 ${name}`,
+    noIntent: '✗“Message Content Intent”没有开启。请到开发者后台的“Bot”页面开启并保存，然后按 Enter。',
+    serverTitle: '服务器',
+    invite: (url: string) => `把 bot 邀请到你自己的私人服务器：\n  ${url}`,
+    waitGuild: 'bot 加入服务器后，按 Enter 继续…',
+    noGuild: '✗ bot 还没有加入任何服务器。',
+    pickGuild: '这台电脑要用哪个服务器？',
+    oneGuildPerComputer: '同一个 bot 可以给多台电脑用，但每台电脑需要各自的服务器。',
+    guildTaken: (host: string) => `（${host} 正在使用）`,
+    inviteAnother: '把 bot 邀请到其他服务器',
+    useTakenAnyway: '另一台电脑正在使用这个服务器。确定还要用吗（只有那台电脑已经不再使用时才选 y）？y/N',
+    guildOk: (name: string) => `✓ 使用服务器“${name}”`,
+    userTitle: '谁可以操作 Claude',
+    userGuide: '你的 Discord user ID：在 Discord 的“设置 → 高级”里开启开发者模式，然后右键点击自己的名字 →“复制用户 ID”。',
+    askUser: '你的 Discord user ID：',
+    badUser: '✗ user ID 是 17 到 20 位的数字。',
+    shortcutTitle: '`ccd` 命令',
+    shortcutOk: (p: string) => `✓ ${p}`,
+    shortcutConflict: (p: string) => `⚠️  ${p} 已经存在而且不是我们创建的，所以没有动它。请改用 \`claude-discord-sync ccd\`。`,
+    pathHint: (dir: string) => `⚠️  ${dir} 不在 PATH 里，请把这行加到 shell 配置文件里：\n  export PATH="${dir}:$PATH"`,
+    pathAdded: (dir: string) => `✓ 已把 ${dir} 加入 PATH（打开新的终端后生效）`,
+    autostartTitle: '后台服务',
+    alreadyRunning: '⚠️  已经有一个 daemon 在运行（可能是手动启动的）。请先停掉它，再按 Enter。',
+    askAutostart: '要现在启动 daemon，并在每次登录时自动启动吗？',
+    autostartOk: (log: string) => `✓ daemon 已启动，日志：${log}`,
+    autostartFailed: (err: string) => `✗ 无法设置自动启动：${err}\n  可以手动运行：claude-discord-sync daemon`,
+    manualStart: '请自己运行 daemon：claude-discord-sync daemon',
+    saved: (f: string) => `✓ 已保存 ${f}`,
+    done: [
+      '\n设置完成！接下来：',
+      '  1. 打开一个新的终端，用 `ccd` 启动 Claude Code（代替 `claude`）。',
+      '  2. Claude Code 启动时会询问 development channel，请确认。',
+      '  3. 服务器的“Claude Sessions”分类里会出现这个 session 的频道。',
+      '\n随时可以用这条命令检查：claude-discord-sync doctor',
+    ].join('\n'),
+  },
 }
 type Text = (typeof text)['en']
 
@@ -140,8 +192,10 @@ const PERMISSIONS = [10n, 4n, 6n, 11n, 14n, 15n, 16n, 28n, 34n, 35n, 38n, 51n].r
 
 async function main() {
   const existing = readConfigFile()
-  const langAnswer = await ask('Language / 語言: 1) English  2) 繁體中文', existing.language === 'zh-TW' ? '2' : '1')
-  const language = langAnswer === '2' ? 'zh-TW' : 'en'
+  const choices = ['en', 'zh-TW', 'zh-CN'] as const
+  const current = String(choices.indexOf(pickLanguage(existing.language)) + 1)
+  const langAnswer = await ask('Language / 語言 / 语言: 1) English  2) 繁體中文  3) 简体中文', current)
+  const language = choices[Number(langAnswer) - 1] ?? 'en'
   const t: Text = text[language]
   console.log(t.welcome)
   if (!Bun.which('claude')) console.log(t.noClaude)
