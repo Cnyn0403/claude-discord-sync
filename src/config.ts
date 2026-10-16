@@ -34,7 +34,7 @@ const OFFICIAL_DIR = join(CLAUDE_DIR, 'channels', 'discord')
 
 export type Config = {
   token: string
-  /** Language of the Discord-facing text: "en" (default) or "zh-TW". */
+  /** Language of the Discord-facing text: "en" (default), "zh-TW" or "zh-CN". */
   language: Language
   /** Guild to create channels in. Auto-detected when the bot is in exactly one guild. */
   guildId?: string

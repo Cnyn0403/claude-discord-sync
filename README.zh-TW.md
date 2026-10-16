@@ -1,12 +1,12 @@
 # claude-discord-sync
 
-[English](README.md) · **繁體中文**
+[English](README.md) · **繁體中文** · [简体中文](README.zh-CN.md)
 
 把本機每個 Claude Code session 同步到各自的 Discord 頻道，並且能從 Discord 操作 session：跟 Claude 對話、用下拉選單回答它的問題、用按鈕核准計畫和權限、中斷它，也能用手機開新 session、結束或恢復 session。
 
 > 這是非官方的社群專案，跟 Anthropic 沒有關係。它用到 Claude Code 的 *channels* 功能（research preview）和 Claude Code 內部的 session 檔案，所以 Claude Code 更新後可能會壞掉。
 
-Discord 上的文字支援英文和繁體中文，用設定裡的 `"language"` 切換，**預設是英文**，要用中文請設成 `"zh-TW"`。
+Discord 上的文字支援英文、繁體中文和簡體中文，用設定裡的 `"language"` 切換，**預設是英文**，要用繁體中文請設成 `"zh-TW"`。
 
 ```
  Discord guild                        本機
@@ -215,7 +215,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 
 | 設定 | 說明 |
 |---|---|
-| `language` | `"en"`（預設）或 `"zh-TW"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
+| `language` | `"en"`（預設）、`"zh-TW"` 或 `"zh-CN"`。斜線指令的說明不受這個設定影響，會依照每個人自己的 Discord 語言顯示 |
 | `guildId` | 這台電腦使用的伺服器，設定時會詢問。每台電腦需要各自的伺服器 |
 | `allowFrom` | 擁有者：對所有 session 有完整權限的 Discord user ID。其他人只能使用 session [分享](#分享)給他們的權限 |
 | `categoryName` | session 頻道所在的分類 |

@@ -10,6 +10,7 @@ import { spawn } from 'child_process'
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { STATE_DIR, readConfigFile } from './config'
+import { pickLanguage } from './i18n'
 import { removeAutostart } from './autostart'
 import { removeShortcut, removeFromUserPath, SHORTCUT } from './shortcut'
 import { COMPILED } from './self'
@@ -43,8 +44,21 @@ const text = {
     kept: (p: string) => `- 保留了設定、token 和狀態檔：${p}`,
     discord: '\nDiscord 上的頻道請自己刪除，或是到 https://discord.com/developers/applications 刪除 bot',
   },
+  'zh-CN': {
+    intro: '这会把 claude-discord-sync 从这台电脑上移除，要继续吗？',
+    autostart: '✓ 已停止 daemon 并移除开机自启',
+    noAutostart: '- 没有设置开机自启',
+    shortcut: (p: string) => `✓ 已删除 ${p}`,
+    program: (p: string) => `✓ 已删除 ${p}`,
+    programLater: (p: string) => `✓ ${p} 会在几秒后删除`,
+    source: (p: string) => `- 源码文件夹保留不动：${p}`,
+    askPurge: (p: string) => `要一并删除配置、bot token 和状态文件（${p}）吗？`,
+    purged: (p: string) => `✓ 已删除 ${p}`,
+    kept: (p: string) => `- 保留了配置、token 和状态文件：${p}`,
+    discord: '\nDiscord 上的频道请自己删除，或者到 https://discord.com/developers/applications 删除 bot',
+  },
 }
-const t = text[readConfigFile().language === 'zh-TW' ? 'zh-TW' : 'en']
+const t = text[pickLanguage(readConfigFile().language)]
 
 const args = process.argv.slice(2)
 const interactive = process.stdin.isTTY && !args.includes('--yes')
