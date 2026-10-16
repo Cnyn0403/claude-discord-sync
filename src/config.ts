@@ -61,6 +61,29 @@ export type Config = {
   deleteEndedAfterDays?: number
   /** Check GitHub once a day for a newer release and say so in the console. */
   updateCheck: boolean
+  /**
+   * How Discord messages reach ccd sessions. "channels": Claude Code channels. "hooks" (beta): hooks, for
+   * logins without channels (Bedrock, Vertex, Foundry, API gateways). Unset or "auto": hooks for those logins.
+   */
+  input?: 'auto' | 'channels' | 'hooks'
+}
+
+/**
+ * Whether Discord input should go through hooks rather than channels, judged
+ * from Claude Code's environment (hooks inherit it, settings.json "env" included).
+ * Channels need a claude.ai login or a Console API key.
+ */
+export function useHookInput(env: NodeJS.ProcessEnv = process.env): boolean {
+  const setting = readConfigFile().input
+  if (setting === 'channels' || setting === 'hooks') return setting === 'hooks'
+  const on = (v?: string) => !!v && v !== '0' && v.toLowerCase() !== 'false'
+  if (on(env.CLAUDE_CODE_USE_BEDROCK) || on(env.CLAUDE_CODE_USE_VERTEX) || on(env.CLAUDE_CODE_USE_FOUNDRY)) return true
+  if (!env.ANTHROPIC_BASE_URL) return false
+  try {
+    return new URL(env.ANTHROPIC_BASE_URL).hostname !== 'api.anthropic.com'
+  } catch {
+    return true
+  }
 }
 
 function readEnvFile(path: string): Record<string, string> {

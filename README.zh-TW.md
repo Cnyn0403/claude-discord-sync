@@ -39,7 +39,7 @@ Discord 上的文字支援英文、繁體中文和簡體中文，用設定裡的
 ## 需求
 
 - Linux、macOS 或 Windows 10/11（見[平台支援](#平台支援)）
-- 支援 channels 的 [Claude Code](https://claude.com/claude-code)，並用 claude.ai 帳號或 Console API key 登入。Amazon Bedrock、Google Vertex AI、Microsoft Foundry 和第三方 API gateway 都不能用 channels；Team 和 Enterprise 組織需要管理員先開啟。沒有 channels 時 session 仍會同步，但在 Discord 上只能看
+- 支援 channels 的 [Claude Code](https://claude.com/claude-code)，並用 claude.ai 帳號或 Console API key 登入。Amazon Bedrock、Google Vertex AI、Microsoft Foundry 和第三方 API gateway 都不能用 channels；Team 和 Enterprise 組織需要管理員先開啟。沒有 channels 時，`ccd` 的 session 會改用 hook 接收 Discord 訊息（beta，見[不支援 channels 的登入方式](#不支援-channels-的登入方式beta)）
 - Linux 和 macOS 上的 `/new`、`/resume` 需要 tmux（`brew install tmux`、`apt install tmux`）
 - 一個在**私人**伺服器裡的 Discord bot（見[安全性](#安全性)），安裝精靈會一步一步帶你建立
 
@@ -159,6 +159,16 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 
 只有看得到 session 頻道的人才能加入（用 `/share` 分享）。會議 30 分鐘沒人說話時，bot 會提醒一次；它不會自己把會議交給 Claude。同時 tag 人和 bot 的訊息會當成一般訊息交給 Claude，不會開會議。
 
+## 不支援 channels 的登入方式（beta）
+
+Claude Code 的 channels 需要用 claude.ai 帳號或 Console API key 登入。如果用的是 Amazon Bedrock、Google Vertex AI、Microsoft Foundry 或 API gateway（`ANTHROPIC_BASE_URL`），`ccd` 的 session 會改用 hook 接收 Discord 的輸入：
+
+- **訊息**：session 閒置時透過 `asyncRewake` hook 叫醒 Claude；Claude 工作中送出的訊息，會在下一次工具呼叫後交給它。Claude Code 會把 hook 的輸出標成系統通知而不是使用者輸入，所以 Claude 對這類訊息可能會比 channel 訊息謹慎一些。
+- **權限請求**：透過 `PermissionRequest` hook 貼出「允許／拒絕／改在終端機回答」按鈕，終端機的對話框同時也能操作。
+- 選擇題、計畫、`/stop`、`/new` 等其他功能和使用 channels 時相同。終端機上這些訊息只會顯示成「Stop hook feedback」。
+
+使用哪種方式是依 Claude Code 的環境變數判斷（包括 `settings.json` 裡的 `env`），也可以在設定檔用 `"input"` 指定。這是新功能，測試得比 channels 少，有問題請[回報](https://github.com/Cnyn0403/claude-discord-sync/issues)。
+
 ## 用量
 
 `ccd` 啟動的 session 會掛上一個小的狀態列程式（`claude-discord-sync statusline`），把 Claude Code 交給狀態列的資料存下來：上下文視窗用量、方案的本時段和本週限制、累計數字。如果你在 `~/.claude/settings.json` 設了自己的狀態列，會用同樣的輸入照常執行，終端機看起來不變。一般 `claude` 啟動的 session 只能從 transcript 得知上下文大小。
@@ -231,6 +241,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | `liveStatus` | Claude 工作時，在頻道底部保留一則訊息，顯示已經工作多久、正在用哪個工具；設成 `false` 就關閉 |
 | `attachOver` | 回覆超過幾個字就改成附檔 |
 | `updateCheck` | 每天檢查一次 GitHub 有沒有新版本；有的話會在控制台 @ 你通知一次，並一直顯示在最上面直到更新。`false` 關閉 |
+| `input` | Discord 訊息怎麼送進 `ccd` 的 session：`"auto"`（預設：Bedrock、Vertex、Foundry 和 API gateway 用 hook，其他用 channels）、`"channels"` 或 `"hooks"`（見[不支援 channels 的登入方式](#不支援-channels-的登入方式beta)） |
 
 環境變數 `DISCORD_SYNC_ASK_TIMEOUT`（秒，預設 600）決定選擇題或計畫在 Discord 上等多久，逾時就回到終端機作答。
 

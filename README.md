@@ -39,7 +39,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 ## Requirements
 
 - Linux, macOS, or Windows 10/11 (see [Platform support](#platform-support))
-- [Claude Code](https://claude.com/claude-code) with channels support, signed in with a claude.ai account or a Console API key. Channels aren't available on Amazon Bedrock, Google Vertex AI, Microsoft Foundry or through third-party API gateways, and Team and Enterprise organizations need an admin to turn them on. Without channels, sessions are still mirrored, but read-only on Discord
+- [Claude Code](https://claude.com/claude-code) with channels support, signed in with a claude.ai account or a Console API key. Channels aren't available on Amazon Bedrock, Google Vertex AI, Microsoft Foundry or through third-party API gateways, and Team and Enterprise organizations need an admin to turn them on. Without channels, `ccd` sessions take Discord input through hooks instead (beta, see [Logins without channels](#logins-without-channels-beta))
 - tmux for `/new` and `/resume` on Linux and macOS (`brew install tmux`, `apt install tmux`)
 - A Discord bot in a **private** server (see [Security](#security)); setup walks you through creating one
 
@@ -159,6 +159,16 @@ To talk things over with the people you shared a session with, without clutterin
 
 Only people who can see the session channel can join (use `/share`). The bot reminds you once if a meeting goes quiet for 30 minutes; it never sends a meeting to Claude on its own. A message mentioning both a person and the bot is a normal message to Claude, not a meeting.
 
+## Logins without channels (beta)
+
+Claude Code channels need a claude.ai login or a Console API key. With Amazon Bedrock, Google Vertex AI, Microsoft Foundry or an API gateway (`ANTHROPIC_BASE_URL`), `ccd` sessions take Discord input through hooks instead:
+
+- **Messages** wake an idle session through an `asyncRewake` hook; ones sent while Claude works are handed over after its next tool call. Claude Code labels hook output as a system notification rather than user input, so Claude may treat these messages a little more cautiously than channel messages.
+- **Permission prompts** are posted with *Allow / Deny / Answer in terminal* through a `PermissionRequest` hook; the terminal dialog stays usable at the same time.
+- Questions, plans, `/stop`, `/new` and everything else work as with channels. In the terminal the messages show up only as "Stop hook feedback".
+
+The mode is picked from Claude Code's environment, `env` in `settings.json` included; set `"input"` in the config to force it. This is new and tested less than channels; please [report](https://github.com/Cnyn0403/claude-discord-sync/issues) what doesn't work.
+
 ## Usage
 
 `ccd` sessions run a small status line (`claude-discord-sync statusline`) that keeps the snapshot Claude Code hands status line commands: context window use, the plan's session and weekly limits, running totals. If you have your own status line in `~/.claude/settings.json`, it still runs with the same input, so the terminal looks the same. Sessions started with plain `claude` only have their context size, from the transcript.
@@ -231,6 +241,7 @@ Setup marks servers another computer is already using. A daemon also checks at s
 | `liveStatus` | While Claude works, keep one message at the bottom of the channel showing how long it has been working and which tool is running; `false` disables |
 | `attachOver` | Replies longer than this many characters are attached as `.md` |
 | `updateCheck` | Check GitHub once a day for a new release; the console announces it once with an @-mention and lists it at the top until you update. `false` disables |
+| `input` | How Discord messages reach `ccd` sessions: `"auto"` (default: hooks for Bedrock, Vertex, Foundry and API gateways, channels otherwise), `"channels"` or `"hooks"` (see [Logins without channels](#logins-without-channels-beta)) |
 
 Environment variable `DISCORD_SYNC_ASK_TIMEOUT` (seconds, default 600) sets how long a question or plan waits on Discord before falling back to the terminal.
 

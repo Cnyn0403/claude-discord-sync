@@ -17,7 +17,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { z } from 'zod'
 import { connect, type Socket } from 'net'
 import { isAbsolute } from 'path'
-import { SOCKET_PATH } from './config'
+import { SOCKET_PATH, useHookInput } from './config'
 import { findClaudePid } from './sessions'
 import { send, onLines, type DaemonMsg, type ClientMsg } from './ipc'
 import { typeIntoOwnTty, keysToTty } from './keys'
@@ -67,7 +67,7 @@ function connectDaemon() {
     sock = s
     const tmuxSocket = process.env.TMUX?.split(',')[0]
     const pane = process.env.TMUX_PANE
-    if (claudePid) send(s, { t: 'hello', claudePid, ...(tmuxSocket && pane ? { tmux: { socket: tmuxSocket, pane } } : {}) })
+    if (claudePid) send(s, { t: 'hello', claudePid, ...(tmuxSocket && pane ? { tmux: { socket: tmuxSocket, pane } } : {}), ...(useHookInput() ? { hookInput: true } : {}) })
     process.stderr.write(`discord-sync: connected to daemon (claude pid ${claudePid})\n`)
   })
   onLines<DaemonMsg>(s, msg => {

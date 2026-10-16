@@ -805,7 +805,8 @@ client.on('messageCreate', async (msg: Message) => {
     return
   }
   const peer = t.live ? peers.get(t.live.pid) : undefined
-  if (!peer) {
+  const box = inboxes.get(t.sessionId)
+  if (!peer && !box) {
     void msg
       .reply(m.readOnlyReply)
       .catch(() => {})
@@ -819,8 +820,8 @@ client.on('messageCreate', async (msg: Message) => {
       return
     }
     const behavior = perm[1].toLowerCase().startsWith('y') ? 'allow' : 'deny'
-    ipcSend(peer, { t: 'permission', request_id: perm[2].toLowerCase(), behavior })
-    void msg.react(behavior === 'allow' ? '✅' : '❌').catch(() => {})
+    const ok = t.live && answerPermission(t.live.pid, perm[2].toLowerCase(), behavior)
+    void msg.react(ok ? (behavior === 'allow' ? '✅' : '❌') : '❓').catch(() => {})
     return
   }
   // @-mentioning people (but not the bot) opens a meeting thread.
@@ -840,8 +841,7 @@ client.on('messageCreate', async (msg: Message) => {
     t.st.lastPrompt = msg.content.replace(/\s+/g, ' ').slice(0, 200)
     stateDirty = true
   }
-  ipcSend(peer, {
-    t: 'message',
+  const item: InboxItem = {
     content: msg.content || (files.length ? '(attachment)' : ''),
     meta: {
       message_id: msg.id,
@@ -851,7 +851,11 @@ client.on('messageCreate', async (msg: Message) => {
       ts: msg.createdAt.toISOString(),
       ...(files.length ? { attachments: files.join('; ') } : {}),
     },
-  })
+  }
+  if (box) {
+    box.queue.push(item)
+    flushInbox(t.sessionId)
+  } else ipcSend(peer!, { t: 'message', ...item })
   void msg.react('📨').catch(() => {})
 })
 
@@ -912,20 +916,18 @@ client.on('interactionCreate', async (i: Interaction) => {
     return
   }
   if (!i.isButton()) return
-  const match = /^perm:(allow|deny):(\d+):([a-km-z]{5})$/.exec(i.customId)
+  const match = /^perm:(allow|deny|local):(\d+):([a-km-z]{5})$/.exec(i.customId)
   if (!match) return
   const [, behavior, pid, request_id] = match
   if (!can(i.user.id, trackedByPid(Number(pid))?.st, 'approve')) {
     await i.reply({ content: m.notAuthorized, ephemeral: true }).catch(() => {})
     return
   }
-  const peer = peers.get(Number(pid))
-  if (!peer) {
+  if (!answerPermission(Number(pid), request_id, behavior as 'allow' | 'deny' | 'local')) {
     await i.reply({ content: m.sessionDisconnected, ephemeral: true }).catch(() => {})
     return
   }
-  ipcSend(peer, { t: 'permission', request_id, behavior: behavior as 'allow' | 'deny' })
-  const label = behavior === 'allow' ? m.allowed : m.denied
+  const label = behavior === 'allow' ? m.allowed : behavior === 'deny' ? m.denied : m.answerInTerminal
   await i.update({ content: `${i.message.content}\n\n**${label}**（${i.user.username}）`, components: [] }).catch(() => {})
 })
 
@@ -2845,7 +2847,149 @@ function trackedByPid(pid: number): Tracked | undefined {
   return undefined
 }
 
+/** Post a permission prompt with Allow / Deny buttons; hook input also gets "answer in terminal". */
+async function postPermission(
+  t: Tracked,
+  pid: number,
+  req: { request_id: string; tool_name: string; description: string; input_preview: string },
+  local = false,
+) {
+  const ch = await channelOf(t)
+  if (!ch) return undefined
+  let preview = req.input_preview
+  try {
+    preview = JSON.stringify(JSON.parse(preview), null, 2)
+  } catch {}
+  const body = chunk(
+    [m.permissionNeeded(req.tool_name), req.description, '```json\n' + preview.slice(0, 1200) + '\n```', m.permissionReplyHint(req.request_id)]
+      .filter(Boolean)
+      .join('\n'),
+  )[0]
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`perm:allow:${pid}:${req.request_id}`).setLabel(m.allow).setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`perm:deny:${pid}:${req.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
+    ...(local ? [new ButtonBuilder().setCustomId(`perm:local:${pid}:${req.request_id}`).setLabel(m.answerInTerminal).setEmoji('💻').setStyle(ButtonStyle.Secondary)] : []),
+  )
+  const who = audience(t.st, 'approve')
+  return await enqueue(ch.id, () => ch.send({ content: `${mentionsOf(who)}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: who } })).catch(
+    () => undefined,
+  )
+}
+
+/** Hand a permission answer to whoever asked: a PermissionRequest hook (hook input) or the channel server. */
+function answerPermission(pid: number, request_id: string, behavior: 'allow' | 'deny' | 'local'): boolean {
+  const hook = hookPermissions.get(request_id)
+  if (hook) {
+    hookPermissions.delete(request_id)
+    ipcSend(hook.sock, { t: 'perm_result', ...(behavior === 'local' ? {} : { behavior }) })
+    return true
+  }
+  const peer = peers.get(pid)
+  if (!peer || behavior === 'local') return false
+  ipcSend(peer, { t: 'permission', request_id, behavior })
+  return true
+}
+
+// ---- hook input (beta) -----------------------------------------------------
+// For logins without channels, ccd's inbox-hook carries Discord messages in: a
+// waiter started on SessionStart / Stop is handed the queued messages once the
+// session is idle (it exits 2, which wakes Claude), and a PostToolUse hook picks
+// up what arrives while Claude works. A session with an inbox takes its Discord
+// input this way instead of through the channel server.
+
+type InboxItem = { content: string; meta: Record<string, string> }
+const inboxes = new Map<string, { waiter?: Socket; queue: InboxItem[] }>()
+/** request_id -> the PermissionRequest hook waiting for the answer, and the prompt it posted. */
+const hookPermissions = new Map<string, { sock: Socket; sessionId: string; message?: Message }>()
+/** Claude Code PIDs whose channel server said Discord input goes through hooks; their channel permission relays are ignored. */
+const hookInputPids = new Set<number>()
+
+/**
+ * A prompt answered in the terminal leaves its hook waiting: once the turn is
+ * over, release it and mark the Discord prompt answered.
+ */
+function settleHookPermissions(sessionId: string) {
+  for (const [id, p] of hookPermissions) {
+    if (p.sessionId !== sessionId) continue
+    hookPermissions.delete(id)
+    ipcSend(p.sock, { t: 'perm_result' })
+    void p.message?.edit({ content: `${p.message.content}\n\n**${m.answerInTerminal}**`, components: [] }).catch(() => {})
+  }
+}
+
+const attr = (v: string) => v.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+
+/** The messages as channel tags, so the discord-sync instructions apply as they do to channel messages. */
+function inboxText(items: InboxItem[]): string {
+  return [
+    'Discord messages for this session, relayed by discord-sync. Claude Code channels are not available with this login, so they arrive through a hook; treat each one like a <channel source="discord-sync"> message from the user.',
+    ...items.map(i => `<channel source="discord-sync"${Object.entries(i.meta).map(([k, v]) => ` ${k}="${attr(v)}"`).join('')}>\n${i.content}\n</channel>`),
+  ].join('\n\n')
+}
+
+/** Wake an idle session with what's queued. A busy one gets it from PostToolUse or its next Stop. */
+function flushInbox(sessionId: string) {
+  const box = inboxes.get(sessionId)
+  if (!box) return
+  const t = tracked.get(sessionId)
+  if (!t?.live) {
+    if (!box.waiter) inboxes.delete(sessionId)
+    return
+  }
+  if (!box.waiter || !box.queue.length || t.live.status !== 'idle') return
+  ipcSend(box.waiter, { t: 'inbox', text: inboxText(box.queue.splice(0)) })
+  box.waiter = undefined
+}
+
+function inboxOf(sessionId: string) {
+  let box = inboxes.get(sessionId)
+  if (!box) {
+    inboxes.set(sessionId, (box = { queue: [] }))
+    const t = tracked.get(sessionId)
+    if (t) void post(t, [m.hookInputOn]).catch(() => {})
+    log(`hook input for session ${sessionId}`)
+  }
+  return box
+}
+
+const PERMISSION_ID_LETTERS = 'abcdefghijkmnopqrstuvwxyz'
+
 async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) {
+  if (msg.t === 'inbox_wait') {
+    settleHookPermissions(msg.sessionId)
+    const box = inboxOf(msg.sessionId)
+    if (box.waiter && box.waiter !== sock) ipcSend(box.waiter, { t: 'inbox_close' })
+    box.waiter = sock
+    sock.once('close', () => {
+      if (box.waiter === sock) box.waiter = undefined
+    })
+    flushInbox(msg.sessionId)
+    return
+  }
+  if (msg.t === 'inbox_poll') {
+    const box = inboxes.get(msg.sessionId)
+    ipcSend(sock, { t: 'inbox', text: box?.queue.length ? inboxText(box.queue.splice(0)) : '' })
+    return
+  }
+  if (msg.t === 'hook_permission') {
+    const t = tracked.get(msg.sessionId)
+    if (!t?.live || isPaused(t.st)) return void ipcSend(sock, { t: 'perm_result' })
+    inboxOf(msg.sessionId)
+    let request_id = ''
+    do request_id = Array.from({ length: 5 }, () => PERMISSION_ID_LETTERS[Math.floor(Math.random() * PERMISSION_ID_LETTERS.length)]).join('')
+    while (hookPermissions.has(request_id))
+    const pending: { sock: Socket; sessionId: string; message?: Message } = { sock, sessionId: msg.sessionId }
+    hookPermissions.set(request_id, pending)
+    sock.once('close', () => {
+      if (hookPermissions.get(request_id) === pending) hookPermissions.delete(request_id)
+    })
+    pending.message = await postPermission(t, t.live.pid, { ...msg, request_id }, true)
+    if (!pending.message) {
+      hookPermissions.delete(request_id)
+      ipcSend(sock, { t: 'perm_result' })
+    }
+    return
+  }
   if (msg.t === 'ask') {
     await startAsk(sock, msg.sessionId, msg.questions)
     return
@@ -2877,35 +3021,16 @@ async function handlePeer(sock: Socket, msg: ClientMsg, self: { pid?: number }) 
     else peerTmux.delete(msg.claudePid)
     log(`channel server connected for pid ${msg.claudePid}`)
     const t = trackedByPid(msg.claudePid)
-    if (t) await post(t, [m.channelConnected])
+    if (msg.hookInput) hookInputPids.add(msg.claudePid)
+    else hookInputPids.delete(msg.claudePid)
+    if (t && !msg.hookInput) await post(t, [m.channelConnected])
     return
   }
   const t = self.pid ? trackedByPid(self.pid) : undefined
   if (msg.t === 'permission_request') {
-    // Paused: the prompt is only answered in the terminal.
-    if (!t || isPaused(t.st)) return
-    const ch = await channelOf(t)
-    if (!ch) return
-    let preview = msg.input_preview
-    try {
-      preview = JSON.stringify(JSON.parse(preview), null, 2)
-    } catch {}
-    const body = chunk(
-      [
-        m.permissionNeeded(msg.tool_name),
-        msg.description,
-        '```json\n' + preview.slice(0, 1200) + '\n```',
-        m.permissionReplyHint(msg.request_id),
-      ].join('\n'),
-    )[0]
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`perm:allow:${self.pid}:${msg.request_id}`).setLabel(m.allow).setEmoji('✅').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`perm:deny:${self.pid}:${msg.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
-    )
-    const who = audience(t.st, 'approve')
-    await enqueue(ch.id, () =>
-      ch.send({ content: `${mentionsOf(who)}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: who } }),
-    )
+    // Paused: the prompt is only answered in the terminal. Hook input relays its own.
+    if (!t || isPaused(t.st) || hookInputPids.has(self.pid!)) return
+    await postPermission(t, self.pid!, msg)
     return
   }
   if (msg.t === 'send_file') {
@@ -2994,6 +3119,9 @@ client.once('clientReady', async c => {
   log(`syncing into ${guild.name} (${guild.id})`)
   startIpc()
   setInterval(() => void tick(), TICK_MS)
+  setInterval(() => {
+    for (const sid of inboxes.keys()) flushInbox(sid)
+  }, TICK_MS)
   void tick()
   if (cfg.updateCheck) {
     const check = () => void checkForUpdate().catch(e => log('update check failed:', e?.message ?? e))

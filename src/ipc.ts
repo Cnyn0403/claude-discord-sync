@@ -4,7 +4,8 @@ import type { Key } from './keys'
 /** Messages from a per-session channel server to the daemon. */
 export type ClientMsg =
   /** tmux: the pane Claude Code runs in, if any (inherited TMUX / TMUX_PANE). */
-  | { t: 'hello'; claudePid: number; tmux?: { socket: string; pane: string } }
+  /** hookInput: channels aren't available with this login, so inbox-hook.ts carries Discord input instead. */
+  | { t: 'hello'; claudePid: number; tmux?: { socket: string; pane: string }; hookInput?: boolean }
   | { t: 'permission_request'; request_id: string; tool_name: string; description: string; input_preview: string }
   | { t: 'send_file'; id: number; path: string; caption?: string }
   | { t: 'type_result'; ok: boolean; error?: string }
@@ -14,6 +15,12 @@ export type ClientMsg =
   | { t: 'ask'; sessionId: string; questions: AskQuestion[] }
   /** From ask-hook.ts: ExitPlanMode plan to approve or send back on Discord. */
   | { t: 'plan'; sessionId: string; plan: string }
+  /** From inbox-hook.ts (hook input, beta): wake this idle session with the next Discord messages. */
+  | { t: 'inbox_wait'; sessionId: string }
+  /** From inbox-hook.ts after a tool call: Discord messages that arrived while Claude was working. */
+  | { t: 'inbox_poll'; sessionId: string }
+  /** From inbox-hook.ts: a permission prompt to answer on Discord. */
+  | { t: 'hook_permission'; sessionId: string; tool_name: string; description: string; input_preview: string }
 
 export type AskQuestion = {
   question: string
@@ -33,6 +40,12 @@ export type DaemonMsg =
   /** /stop, /end: type keys into the session's terminal. */
   | { t: 'type'; keys: Key[] }
   | { t: 'pause_result'; text: string }
+  /** To inbox-hook.ts: Discord messages for Claude (empty after a poll with nothing waiting). */
+  | { t: 'inbox'; text: string }
+  /** To a waiting inbox-hook.ts: a newer one took over, exit quietly. */
+  | { t: 'inbox_close' }
+  /** To inbox-hook.ts: the permission answer; none = answer in the terminal. */
+  | { t: 'perm_result'; behavior?: 'allow' | 'deny' }
 
 export function send(sock: Socket, msg: ClientMsg | DaemonMsg): void {
   if (!sock.destroyed) sock.write(JSON.stringify(msg) + '\n')

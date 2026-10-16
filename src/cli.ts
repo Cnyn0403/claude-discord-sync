@@ -24,6 +24,7 @@ const COMMANDS: Record<string, () => Promise<unknown>> = {
   channel: () => import('./channel-server'),
   'ask-hook': () => import('./ask-hook'),
   'stop-hook': () => import('./stop-hook'),
+  'inbox-hook': () => import('./inbox-hook'),
   statusline: () => import('./statusline').then(s => s.run()),
   'win-console': () => import('./win-console'),
 }

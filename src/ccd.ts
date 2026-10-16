@@ -9,7 +9,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { CLAUDE_DIR, STATE_DIR } from './config'
+import { CLAUDE_DIR, STATE_DIR, readConfigFile } from './config'
 import { USER_STATUSLINE_FILE } from './statusline'
 import { IS_WIN } from './platform'
 import { selfCommand } from './self'
@@ -33,6 +33,9 @@ function userStatusLine(): { command?: string; padding?: number } {
   }
 }
 
+/** Waits for Discord messages while the session is idle (see inbox-hook.ts). */
+const waiter = { type: 'command', command: hook('inbox-hook'), async: true, asyncRewake: true, timeout: 30 * 86_400 }
+
 function writeConfig(): string {
   const dir = join(STATE_DIR, 'ccd')
   mkdirSync(dir, { recursive: true })
@@ -54,6 +57,16 @@ function writeConfig(): string {
             },
             { matcher: '*', hooks: [{ type: 'command', command: hook('stop-hook') }] },
           ],
+          // Hook input (beta), for logins without channels; inbox-hook exits at once when channels work.
+          // asyncRewake hooks keep their timeout, so the idle waiters get a long one.
+          ...(readConfigFile().input === 'channels'
+            ? {}
+            : {
+                SessionStart: [{ hooks: [waiter] }],
+                Stop: [{ hooks: [waiter] }],
+                PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: hook('inbox-hook'), timeout: 10 }] }],
+                PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: hook('inbox-hook'), timeout: askTimeout + 30 }] }],
+              }),
         },
       },
       null,

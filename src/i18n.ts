@@ -238,6 +238,7 @@ const en = {
   updateHowBinary: 'To update, run `claude-discord-sync update` on this computer.',
   updateHowSource: 'This computer runs from source: run `git pull && bun install` in the checkout, then restart the daemon.',
   updateLine: (tag: string) => `🆕 Update available: **${tag}**`,
+  hookInputOn: "-# 🪝 Claude Code channels aren't available with this login, so Discord messages reach this session through hooks (beta). They're delivered when Claude is idle or between tool calls.",
 } as const
 
 type Widen<T> = { [K in keyof T]: T[K] extends string ? string : T[K] }
@@ -460,6 +461,7 @@ const zhTW: Messages = {
   updateHowBinary: '在這台電腦上執行 `claude-discord-sync update` 即可更新。',
   updateHowSource: '這台電腦是從原始碼執行的：在原始碼資料夾執行 `git pull && bun install`，再重新啟動 daemon。',
   updateLine: tag => `🆕 有新版本：**${tag}**`,
+  hookInputOn: '-# 🪝 這個登入方式不支援 Claude Code channels，Discord 訊息改用 hook 送進 session（beta）。Claude 閒置時或兩次工具呼叫之間才會收到。',
 }
 
 const zhCN: Messages = {
@@ -677,6 +679,7 @@ const zhCN: Messages = {
   updateHowBinary: '在这台电脑上运行 `claude-discord-sync update` 即可更新。',
   updateHowSource: '这台电脑是从源码运行的：在源码文件夹运行 `git pull && bun install`，然后重启 daemon。',
   updateLine: tag => `🆕 有新版本：**${tag}**`,
+  hookInputOn: '-# 🪝 这种登录方式不支持 Claude Code channels，Discord 消息改用 hook 发送到 session（beta）。Claude 空闲时或两次工具调用之间才会收到。',
 }
 
 export const LANGUAGES = { en, 'zh-TW': zhTW, 'zh-CN': zhCN } as const satisfies Record<string, Messages>
