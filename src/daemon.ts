@@ -43,7 +43,7 @@ import { promisify } from 'util'
 import { homedir, hostname } from 'os'
 import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, lstatSync, readdirSync, openSync, readSync, closeSync } from 'fs'
 import { basename, dirname, join, relative, resolve, isAbsolute } from 'path'
-import { loadConfig, readConfigFile, CLAUDE_DIR, PROJECTS_DIR, STATE_DIR, SOCKET_PATH, HOST_ID, otherClaim } from './config'
+import { loadConfig, readConfigFile, CLAUDE_DIR, PROJECTS_DIR, STATE_DIR, SOCKET_PATH, HOST_ID, CLAIM_RE, otherClaim } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
@@ -3197,8 +3197,12 @@ async function claimGuild() {
     await ch.send({ content: m.guildTaken(hostname()), allowedMentions: { parse: [] } }).catch(() => {})
     process.exit(0)
   }
+  // Our own claim from a few minutes ago (the daemon this one replaces): it still holds, and topic edits are scarce.
+  const own = CLAIM_RE.exec(fresh.topic ?? '')
+  if (own?.[1] === HOST_ID && Date.now() - Number(own[2]) * 1000 < CLAIM_EVERY_MS) return
   const topic = `${m.consoleTopic}\n-# cds-host=${HOST_ID} seen=${Math.floor(Date.now() / 1000)} (${hostname().replace(/[()]/g, '')})`
-  await fresh.setTopic(clip(topic, 1024)).catch(e => log('console topic update failed:', e?.message ?? e))
+  // Not awaited: a rate-limited edit waits for its window to reset (up to 10 minutes), which used to hold up startup.
+  void fresh.setTopic(clip(topic, 1024)).catch(e => log('console topic update failed:', e?.message ?? e))
 }
 
 /**
