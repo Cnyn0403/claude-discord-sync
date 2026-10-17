@@ -30,6 +30,7 @@ import {
   type MessageActionRowComponentBuilder,
   type RepliableInteraction,
   AttachmentBuilder,
+  EmbedBuilder,
   MessageType,
   MessageFlags,
   ThreadAutoArchiveDuration,
@@ -641,7 +642,7 @@ function noteLastPrompt(t: Tracked, blocks: Block[]) {
 
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000)
-  return m.duration(Math.floor(s / 60), s % 60)
+  return m.duration(Math.floor(s / 86400), Math.floor(s / 3600) % 24, Math.floor(s / 60) % 60, s % 60)
 }
 
 /** @-mention the user when Claude finishes a turn, so they know to come back. */
@@ -2849,40 +2850,64 @@ function captureReplier(): Replier & { text: string } {
   return c
 }
 
+/** ▰▰▰▱▱▱▱▱▱▱ */
+function meter(pct: number, width = 10): string {
+  const full = Math.max(0, Math.min(width, Math.round((pct / 100) * width)))
+  return '▰'.repeat(full) + '▱'.repeat(width - full)
+}
+
+const STATUS_COLORS = { idle: 0x57f287, busy: 0xfee75c, ended: 0x99aab5 }
+
+const pendingLabel = (p: PendingChange) =>
+  p.kind === 'compact' ? m.statusCompact : `${p.kind === 'model' ? m.fieldModel : m.fieldEffort} → ${p.value}`
+
+/** The /status panel: an embed, plus the owner's controls while the session runs. `note` says how the last change went. */
 async function statusPanel(sessionId: string, viewerId: string, note?: string) {
   const st = state.sessions[sessionId]
   const t = tracked.get(sessionId)
-  const owner = isOwner(viewerId)
+  const live = t?.live
   const snap = readSnapshot(sessionId)
   const unknown = m.statusUnknown
-  const mode = t?.live ? await screenOf(t.live.pid).then(s => (s === undefined ? undefined : MODE_LABELS[modeOnScreen(s)])) : undefined
+  const mode = live ? await screenOf(live.pid).then(s => (s === undefined ? undefined : MODE_LABELS[modeOnScreen(s)])) : undefined
   const ctx = t ? contextOf(t) : snap?.context
-  const lines = [m.statusTitle(!t?.live ? m.alreadyEnded : t.live.status === 'busy' ? m.busy : m.idle)]
-  lines.push(m.statusSettings(snap?.model ?? unknown, snap?.effort ?? unknown, mode ?? unknown))
-  if (ctx?.pct !== undefined && ctx.size) lines.push(m.usageContext(Math.round(ctx.pct), tokens(ctx.used ?? (ctx.pct / 100) * ctx.size), tokens(ctx.size)))
-  else if (ctx?.used) lines.push(m.usageContextTokens(tokens(ctx.used)))
-  if (snap?.cacheHit !== undefined) lines.push(m.statusCache(Math.round(snap.cacheHit * 100)))
-  if (snap?.totalIn !== undefined || snap?.totalOut !== undefined) lines.push(m.usageTokens(tokens(snap.totalIn ?? 0), tokens(snap.totalOut ?? 0)))
-  if (snap?.durationMs) lines.push(m.usageDuration(formatDuration(snap.durationMs), snap.linesAdded ?? 0, snap.linesRemoved ?? 0))
-  if (snap?.fastMode !== undefined || snap?.thinking !== undefined) lines.push(m.statusFlags(!!snap.fastMode, !!snap.thinking))
-  lines.push(m.statusWhere(snap?.cwd ?? st?.cwd ?? unknown, snap?.version ?? unknown))
-  if (!snap) lines.push(m.usageNoSnapshot)
-  if (owner) {
-    const plan = planSummary()
-    if (plan) lines.push('', m.usagePlan, `- ${plan}`)
-  }
-  if (snap) lines.push(m.statusUpdated(Math.floor(snap.at / 1000)))
-  if (t?.pending) lines.push('', m.statusQueued(`${t.pending.kind} ${t.pending.value}`.trim()))
-  if (note) lines.push('', note)
+
+  const fields: { name: string; value: string; inline: boolean }[] = []
+  const field = (name: string, value: string, inline = true) => fields.push({ name, value: clip(value, 1024), inline })
+  field(m.fieldModel, snap?.model ?? unknown)
+  field(m.fieldEffort, snap?.effort ?? unknown)
+  field(m.fieldMode, mode ?? unknown)
+  if (ctx?.pct !== undefined) field(m.fieldContext, `${meter(ctx.pct)} ${Math.round(ctx.pct)}%${ctx.size ? `\n${tokens(ctx.used ?? (ctx.pct / 100) * ctx.size)} / ${tokens(ctx.size)}` : ''}`)
+  else if (ctx?.used) field(m.fieldContext, tokens(ctx.used))
+  if (snap?.cacheHit !== undefined) field(m.fieldCache, m.statusCacheHits(Math.round(snap.cacheHit * 100)))
+  if (snap?.totalIn !== undefined || snap?.totalOut !== undefined) field(m.fieldTokens, m.statusTokens(tokens(snap.totalIn ?? 0), tokens(snap.totalOut ?? 0)))
+  if (snap?.durationMs) field(m.fieldRuntime, formatDuration(snap.durationMs))
+  if (snap?.linesAdded !== undefined || snap?.linesRemoved !== undefined) field(m.fieldCode, `+${snap.linesAdded ?? 0} / -${snap.linesRemoved ?? 0}`)
+  if (snap?.fastMode !== undefined || snap?.thinking !== undefined) field(m.fieldOptions, m.statusOptions(!!snap.fastMode, !!snap.thinking))
+  field(m.fieldFolder, `\`${snap?.cwd ?? st?.cwd ?? unknown}\``)
+  field('Claude Code', snap?.version ?? unknown)
+  // Plan usage is the owner's account.
+  const plan = isOwner(viewerId) ? latestPlan() : undefined
+  const planField = (label: string, l?: PlanLimit) =>
+    l && field(m.fieldPlan(label), `${meter(l.pct)} ${Math.round(l.pct)}%${l.resetsAt ? `\n${m.resets(`<t:${Math.floor(l.resetsAt / 1000)}:R>`)}` : ''}`)
+  planField(m.planSession, plan?.fiveHour)
+  planField(m.planWeek, plan?.sevenDay)
+
+  const embed = new EmbedBuilder()
+    .setTitle(m.statusTitle)
+    .setDescription([!live ? m.alreadyEnded : live.status === 'busy' ? m.busy : m.idle, st?.title].filter(Boolean).join(' · '))
+    .setColor(!live ? STATUS_COLORS.ended : live.status === 'busy' ? STATUS_COLORS.busy : STATUS_COLORS.idle)
+    .addFields(fields)
+  if (snap) embed.setFooter({ text: m.statusFooter }).setTimestamp(snap.at)
+  else embed.setFooter({ text: m.usageNoSnapshot.replace(/^-# /, '').replace(/`/g, '') })
 
   const id = (what: string) => `status:${what}:${sessionId}`
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(id('refresh')).setLabel(m.statusRefresh).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
   )
-  const components: ActionRowBuilder<any>[] = []
-  if (owner && t?.live) {
+  const components: ActionRowBuilder<MessageActionRowComponentBuilder>[] = []
+  if (isOwner(viewerId) && live) {
     const select = (what: string, placeholder: string, options: { label: string; value: string }[]) =>
-      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new StringSelectMenuBuilder().setCustomId(id(what)).setPlaceholder(clip(placeholder, 150)).addOptions(options),
       )
     components.push(
@@ -2895,8 +2920,10 @@ async function statusPanel(sessionId: string, viewerId: string, note?: string) {
       new ButtonBuilder().setCustomId(`handoff:make:${sessionId}`).setLabel(m.makeHandoff).setEmoji('📋').setStyle(ButtonStyle.Secondary),
     )
   }
-  components.push(buttons)
-  return { content: clip(lines.join('\n'), 2000), components, allowedMentions: { parse: [] as const } }
+  components.push(buttons as ActionRowBuilder<MessageActionRowComponentBuilder>)
+  // The outcome of the last change sits above the embed; '' clears an earlier one.
+  const content = [t?.pending ? m.statusQueued(pendingLabel(t.pending)) : '', note ?? ''].filter(Boolean).join('\n')
+  return { content: clip(content, 2000), embeds: [embed], components, allowedMentions: { parse: [] as const } }
 }
 
 /** /status: only the asker sees it; the owner gets the controls. */
