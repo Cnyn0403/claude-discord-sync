@@ -48,8 +48,8 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | Mirroring, chat, questions, plans, permissions, console, archive | ✅ | ✅ | ✅ |
-| `/stop`, `/end`, `/model`, `/rename` (typed into the session) | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
-| `/mode` (reads the session's screen) | tmux only | tmux only | the session's console (**experimental**) |
+| `/stop`, `/end`, `/model`, `/rename`, `/compact` (typed into the session) | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
+| `/mode`, `/effort` (reads the session's screen) | tmux only | tmux only | the session's console (**experimental**) |
 | `/new`, `/resume` | tmux | tmux | opens a new console window (**experimental**) |
 | Daemon at login (set up by `setup`) | systemd user unit | launchd agent | Startup folder |
 
@@ -128,9 +128,11 @@ To build the executables yourself: `bun build --compile --target=bun-<os>-<arch>
 | `/sync off` / `/sync on` | session channel, or anywhere for every session | Pause / resume mirroring (see [Pausing](#pausing)) |
 | `/mode <mode>` | session channel | Switch the permission mode (default, accept edits, plan, auto, bypass permissions) by pressing Shift+Tab until the session's footer shows it. Needs a session in tmux (anything started with `/new`) or a Windows console window |
 | `/model <name>` | session channel | Switch the model (`opus`, `sonnet`, `haiku`, `fable`, `default` or a model ID). Types `/model` into the session, so Claude must be idle. Like typing it locally, it also becomes your default for new sessions |
+| `/effort <level>` | session channel | Set the effort level (`low`, `medium`, `high`, `xhigh`, `max`) for this session only, through Claude Code's `/effort` picker. Claude must be idle, and the session's screen must be readable (as with `/mode`) |
+| `/status` | session channel | Only you see it. The session's model, effort, permission mode, context, prompt cache hit rate, folder and Claude Code version. For the owner it is also a control panel: menus for model, effort and permission mode, and buttons for `/compact` and a handoff. A change made while Claude works is applied when it finishes |
 | `yes abcde` / `no abcde` | session channel | Answer a permission prompt by its code |
 
-`!new`, `!stop`, `!end`, `!resume`, `!sync`, `!mode`, `!model`, `!rename` and `!handoff` also work as plain messages, e.g. `!sync off`. `/usage`, `/share`, `/unshare` and `/members` are slash commands only.
+`!new`, `!stop`, `!end`, `!resume`, `!sync`, `!mode`, `!model`, `!effort`, `!rename` and `!handoff` also work as plain messages, e.g. `!sync off`. `/status`, `/usage`, `/share`, `/unshare` and `/members` are slash commands only.
 
 ## Sharing
 
@@ -138,10 +140,10 @@ Session channels are private: only the bot and the owners in `allowFrom` can see
 
 | | Owner | Full | Collaborate | View |
 |---|---|---|---|---|
-| See the channel and conversation, `/members`, `/usage` | ✅ | ✅ | ✅ | ✅ |
+| See the channel and conversation, `/members`, `/usage`, `/status` | ✅ | ✅ | ✅ | ✅ |
 | Talk to Claude, answer questions, `/stop`, `/rename`, `/handoff` | ✅ | ✅ | ✅ | |
 | Approve permission prompts and plans | ✅ | ✅ | | |
-| `/end`, `/new`, `/resume`, `/share`, `/unshare`, `/sync`, `/mode`, `/model`, the console | ✅ | | | |
+| `/end`, `/new`, `/resume`, `/share`, `/unshare`, `/sync`, `/mode`, `/model`, `/effort`, the `/status` controls, the console | ✅ | | | |
 
 Collaborators' messages reach Claude marked with their role. Anyone who can talk to Claude can make it act on your computer, so share with care. Access is kept across `/resume` and in the archive.
 

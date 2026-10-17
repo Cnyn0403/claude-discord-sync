@@ -6,11 +6,20 @@ import { openSync, closeSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { IS_LINUX, IS_MAC } from './platform'
 
-/** BackTab is Shift+Tab, which cycles Claude Code's permission mode. */
-export type Key = 'Escape' | 'Enter' | 'Down' | 'BackTab' | { text: string }
+/** BackTab is Shift+Tab, which cycles Claude Code's permission mode. Left / Right move the /effort slider. */
+export type Key = 'Escape' | 'Enter' | 'Down' | 'Left' | 'Right' | 'BackTab' | { text: string }
+
+const TTY_KEYS: Record<Exclude<Key, { text: string }>, string> = {
+  Escape: '\x1b',
+  Enter: '\r',
+  Down: '\x1b[B',
+  Left: '\x1b[D',
+  Right: '\x1b[C',
+  BackTab: '\x1b[Z',
+}
 
 export function keysToTty(keys: Key[]): string {
-  return keys.map(k => (k === 'Escape' ? '\x1b' : k === 'Enter' ? '\r' : k === 'Down' ? '\x1b[B' : k === 'BackTab' ? '\x1b[Z' : k.text)).join('')
+  return keys.map(k => (typeof k === 'string' ? TTY_KEYS[k] : k.text)).join('')
 }
 
 /** Argument lists for `tmux send-keys`, one invocation each. */

@@ -3,7 +3,7 @@
  * (macOS), or a hidden-window script in the Startup folder (Windows; unlike a
  * scheduled task it needs no admin rights).
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
@@ -128,6 +128,34 @@ WantedBy=default.target
     sh('systemctl', ['--user', 'enable', NAME])
     sh('systemctl', ['--user', 'restart', NAME])
   }
+}
+
+/**
+ * Units written before KillMode=process let systemd kill every Discord-started
+ * session along with the daemon on restart (an `update`, say). Add it to such a
+ * unit; it takes effect from the next restart, so nothing is restarted here.
+ * Returns whether the unit was changed.
+ */
+export function fixSystemdKillMode(): boolean {
+  if (IS_WIN || IS_MAC) return false
+  let unit: string
+  try {
+    unit = readFileSync(SYSTEMD_UNIT, 'utf8')
+  } catch {
+    return false
+  }
+  if (/^KillMode=/m.test(unit) || !/^\[Service\]$/m.test(unit)) return false
+  writeFileSync(
+    SYSTEMD_UNIT,
+    unit.replace(
+      /^\[Service\]$/m,
+      '[Service]\n# Sessions started from Discord run in a tmux server the daemon spawned; restarting the daemon must not kill them.\nKillMode=process',
+    ),
+  )
+  try {
+    sh('systemctl', ['--user', 'daemon-reload'])
+  } catch {}
+  return true
 }
 
 /** Stop the autostarted daemon and remove the login item. Returns whether anything was removed. */

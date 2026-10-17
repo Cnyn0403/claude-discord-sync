@@ -20,12 +20,21 @@ export type Snapshot = {
   durationMs?: number
   linesAdded?: number
   linesRemoved?: number
+  effort?: string
+  version?: string
+  cwd?: string
+  fastMode?: boolean
+  thinking?: boolean
+  /** Prompt cache hit ratio, 0-1. */
+  cacheHit?: number
   /** Plan limits; account-wide, so the newest snapshot of any session is the current one. */
   fiveHour?: PlanLimit
   sevenDay?: PlanLimit
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined)
 
 /** resets_at as ms: Unix seconds, milliseconds or an ISO string. */
 function resetTime(v: unknown): number | undefined {
@@ -57,6 +66,12 @@ export function parseSnapshot(data: any, at: number): Snapshot {
     durationMs: num(data?.cost?.total_duration_ms),
     linesAdded: num(data?.cost?.total_lines_added),
     linesRemoved: num(data?.cost?.total_lines_removed),
+    effort: str(data?.effort?.level),
+    version: str(data?.version),
+    cwd: str(data?.workspace?.current_dir) ?? str(data?.cwd),
+    fastMode: bool(data?.fast_mode),
+    thinking: bool(data?.thinking?.enabled),
+    cacheHit: num(data?.prompt_cache?.hit_ratio),
     fiveHour: limit(data?.rate_limits?.five_hour),
     sevenDay: limit(data?.rate_limits?.seven_day),
   }

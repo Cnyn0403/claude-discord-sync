@@ -51,7 +51,7 @@ import { meetingHtml, type HtmlLabels } from './meeting-html'
 import { readSnapshot, tokens, type PlanLimit } from './usage'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
-import { daemonRunning } from './autostart'
+import { daemonRunning, fixSystemdKillMode } from './autostart'
 import { latestRelease, isNewer } from './release'
 import { VERSION } from './version'
 import { keysToTmux, type Key } from './keys'
@@ -204,6 +204,10 @@ type Tracked = {
   statusUpdating?: boolean
   /** Context size from the transcript's last reply, for sessions without a status line snapshot. */
   ctxTokens?: number
+  /** When the screen was last checked for dialogs that block an unattended session. */
+  dialogCheckAt?: number
+  /** A /status panel change asked for while Claude worked, applied once it's idle. */
+  pending?: PendingChange
 }
 const tracked = new Map<string, Tracked>()
 const creating = new Set<string>()
@@ -701,6 +705,8 @@ async function tick() {
       notifyWhenDone(t)
       updateStatus(t)
       remindIdleMeeting(t)
+      applyPending(t)
+      void dismissBlockingDialogs(t).catch(() => {})
       // Typing indicator while Claude is working (lasts ~10s per call).
       if (t.live?.status === 'busy' && !isPaused(t.st) && Date.now() - t.lastTyping > 8000) {
         t.lastTyping = Date.now()
@@ -757,7 +763,7 @@ async function downloadAttachments(msg: Message): Promise<string[]> {
 
 client.on('messageCreate', async (msg: Message) => {
   if (msg.author.bot || msg.guildId !== guild?.id) return
-  const cmd = /^!(new|stop|end|resume|sync|model|mode|rename|handoff)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
+  const cmd = /^!(new|stop|end|resume|sync|model|effort|mode|rename|handoff)(?:\s+([\s\S]*))?$/i.exec(msg.content.trim())
   if (cmd) {
     const name = cmd[1].toLowerCase()
     if (!can(msg.author.id, sessionByChannel(msg.channelId), name === 'stop' || name === 'rename' || name === 'handoff' ? 'chat' : 'owner')) {
@@ -784,6 +790,12 @@ client.on('messageCreate', async (msg: Message) => {
       const title = (cmd[2] ?? '').trim()
       if (!title) return void (await msg.reply(m.renameUsage))
       await renameSession(messageReplier(msg), msg.channelId, title)
+      return
+    }
+    if (name === 'effort') {
+      const level = (cmd[2] ?? '').trim().toLowerCase()
+      if (!isEffort(level)) return void (await msg.reply(m.effortUsage))
+      await setEffort(messageReplier(msg), msg.channelId, level)
       return
     }
     if (name === 'model') {
@@ -883,6 +895,10 @@ client.on('interactionCreate', async (i: Interaction) => {
     await i.deferReply()
     const r = interactionReplier(i)
     await runCommand(r, i.channelId, i.commandName as Command, i.options.getString('dir') ?? undefined, i.options.getString('prompt') ?? undefined)
+    return
+  }
+  if ((i.isButton() || i.isStringSelectMenu()) && i.customId.startsWith('status:')) {
+    await handleStatusInteraction(i).catch(e => log('status panel failed:', e?.message ?? e))
     return
   }
   if (i.isButton() && i.customId.startsWith('handoff:')) {
@@ -1584,6 +1600,10 @@ const MODE_LABELS: Record<Mode, string> = {
   bypassPermissions: 'bypass permissions',
 }
 
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+type Effort = (typeof EFFORTS)[number]
+const isEffort = (s: string): s is Effort => (EFFORTS as readonly string[]).includes(s)
+
 const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('new'), 'new')
     .addStringOption(o => described(o.setName('dir'), 'dir').setRequired(true).setAutocomplete(true))
@@ -1612,6 +1632,12 @@ const SLASH_COMMANDS = [
   described(new SlashCommandBuilder().setName('handoff'), 'handoff').addStringOption(o => described(o.setName('note'), 'handoffNote').setMaxLength(1000)),
   described(new SlashCommandBuilder().setName('rename'), 'rename').addStringOption(o =>
     described(o.setName('name'), 'renameName').setRequired(true).setMaxLength(90),
+  ),
+  described(new SlashCommandBuilder().setName('status'), 'status'),
+  described(new SlashCommandBuilder().setName('effort'), 'effort').addStringOption(o =>
+    described(o.setName('level'), 'effortLevel')
+      .setRequired(true)
+      .addChoices(...EFFORTS.map(v => ({ name: v, value: v }))),
   ),
   described(new SlashCommandBuilder().setName('model'), 'model').addStringOption(o =>
     described(o.setName('name'), 'modelName').setRequired(true).setAutocomplete(true),
@@ -2622,10 +2648,11 @@ async function checkForUpdate() {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'mode', 'rename', 'handoff', 'usage'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'effort', 'mode', 'rename', 'handoff', 'usage', 'status'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
+  if (i.commandName === 'status') return showStatus(i)
   if (i.commandName === 'usage') {
     // Only the asker sees it; plan usage is the owner's account, so others only get the session's numbers.
     if (!isOwner(i.user.id) && !can(i.user.id, st, 'view')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
@@ -2647,6 +2674,7 @@ async function handleSessionCommand(i: import('discord.js').ChatInputCommandInte
   if (i.commandName === 'sync') return setSync(r, i.channelId, i.options.getString('state') === 'on', i.user.username)
   if (i.commandName === 'mode') return setMode(r, i.channelId, i.options.getString('mode', true) as Mode)
   if (i.commandName === 'model') return setModel(r, i.channelId, i.options.getString('name', true).trim())
+  if (i.commandName === 'effort') return setEffort(r, i.channelId, i.options.getString('level', true) as Effort)
   if (i.commandName === 'rename') return renameSession(r, i.channelId, i.options.getString('name', true).trim())
   if (i.commandName === 'handoff') return makeHandoff(r, i.channelId, i.options.getString('note')?.trim() || undefined)
   const user = i.options.getUser('user', true)
@@ -2728,6 +2756,207 @@ async function setModel(r: Replier, channelId: string, name: string) {
     const out = commandOutputSince(transcript, offset)
     if (out !== undefined) return void (await reply.edit(m.modelResult(out)).catch(() => {}))
   }
+}
+
+// ---- /effort -------------------------------------------------------------------
+
+/** The footer of Claude Code's /effort picker. */
+const EFFORT_PICKER_RE = /←\/→ to adjust/
+
+/**
+ * Pick an effort level for this session only. `/effort <level>` would also save
+ * it as the default for every new session, so open the picker instead, slide to
+ * the level and press `s` ("this session only"). The picker has to be seen to
+ * have opened, otherwise the keys would land in the input box.
+ */
+async function setEffort(r: Replier, channelId: string, level: Effort) {
+  const t = trackedByChannel(channelId)
+  if (!t?.live) return void (await r.reply(t || endedByChannel(channelId) ? m.alreadyEnded : m.notSessionChannel))
+  if (t.live.status === 'busy') return void (await r.reply(m.busyTryLater))
+  const pid = t.live.pid
+  const peer = peers.get(pid)
+  if ((await screenOf(pid)) === undefined) return void (await r.reply(m.effortNeedsScreen))
+  const transcript = t.st.transcript
+  const offset = transcript ? (statSync(transcript, { throwIfNoEntry: false })?.size ?? 0) : 0
+  const opened = await typeInto(pid, peer, [{ text: '/effort' }, 'Enter'])
+  if (opened.error) return void (await r.reply(m.cantType(opened.error)))
+  let open = false
+  for (let i = 0; i < 10 && !open; i++) {
+    await Bun.sleep(300)
+    open = EFFORT_PICKER_RE.test((await screenOf(pid)) ?? '')
+  }
+  if (!open) {
+    const out = transcript ? commandOutputSince(transcript, offset) : undefined
+    return void (await r.reply(out ? m.effortResult(out) : m.effortNoPicker))
+  }
+  // All the way left, then right to the level; models with fewer levels stop at their last one.
+  const keys: Key[] = [...EFFORTS.map((): Key => 'Left'), ...EFFORTS.slice(0, EFFORTS.indexOf(level)).map((): Key => 'Right'), { text: 's' }]
+  const picked = await typeInto(pid, peer, keys)
+  if (picked.error) {
+    await typeInto(pid, peer, ['Escape'])
+    return void (await r.reply(m.cantType(picked.error)))
+  }
+  const deadline = Date.now() + 5000
+  while (transcript && Date.now() < deadline) {
+    await Bun.sleep(500)
+    const out = commandOutputSince(transcript, offset)
+    if (out !== undefined) return void (await r.reply(m.effortResult(out)))
+  }
+  await r.reply(m.effortSent(level))
+}
+
+// ---- /compact ------------------------------------------------------------------
+
+async function compactSession(r: Replier, channelId: string) {
+  const t = trackedByChannel(channelId)
+  if (!t?.live) return void (await r.reply(t || endedByChannel(channelId) ? m.alreadyEnded : m.notSessionChannel))
+  if (t.live.status === 'busy') return void (await r.reply(m.busyTryLater))
+  const { error } = await typeInto(t.live.pid, peers.get(t.live.pid), [{ text: '/compact' }, 'Enter'])
+  await r.reply(error ? m.cantType(error) : m.compactSent)
+}
+
+// ---- dialogs that block unattended sessions ------------------------------------
+
+/** Claude Code prompts that stop a session started from Discord until someone answers at the terminal; Esc means "not now". */
+const BLOCKING_DIALOGS = [/Teach auto mode about your environment\?/]
+const DIALOG_CHECK_MS = 15_000
+
+/** Every so often, look at an idle session's screen and dismiss such a dialog. */
+async function dismissBlockingDialogs(t: Tracked) {
+  if (t.live?.status !== 'idle' || isPaused(t.st) || Date.now() - (t.dialogCheckAt ?? 0) < DIALOG_CHECK_MS) return
+  t.dialogCheckAt = Date.now()
+  const pid = t.live.pid
+  const screen = await screenOf(pid)
+  if (!screen || !/Esc to cancel/.test(screen) || !BLOCKING_DIALOGS.some(re => re.test(screen))) return
+  const { error } = await typeInto(pid, peers.get(pid), ['Escape'])
+  log(error ? `dismissing a dialog in ${t.sessionId} failed: ${error}` : `dismissed a Claude Code dialog in ${t.sessionId}`)
+}
+
+// ---- /status: session state and a control panel ------------------------------------
+
+type PendingChange = { kind: 'model' | 'effort' | 'compact'; value: string; panel: import('discord.js').MessageComponentInteraction }
+
+/** A Replier that keeps the last thing said, so the panel can show the outcome of a command. */
+function captureReplier(): Replier & { text: string } {
+  const c = {
+    text: '',
+    reply: async (text: string) => {
+      c.text = text
+      return { edit: async (t: string) => void (c.text = t) }
+    },
+    react: () => {},
+  }
+  return c
+}
+
+async function statusPanel(sessionId: string, viewerId: string, note?: string) {
+  const st = state.sessions[sessionId]
+  const t = tracked.get(sessionId)
+  const owner = isOwner(viewerId)
+  const snap = readSnapshot(sessionId)
+  const unknown = m.statusUnknown
+  const mode = t?.live ? await screenOf(t.live.pid).then(s => (s === undefined ? undefined : MODE_LABELS[modeOnScreen(s)])) : undefined
+  const ctx = t ? contextOf(t) : snap?.context
+  const lines = [m.statusTitle(!t?.live ? m.alreadyEnded : t.live.status === 'busy' ? m.busy : m.idle)]
+  lines.push(m.statusSettings(snap?.model ?? unknown, snap?.effort ?? unknown, mode ?? unknown))
+  if (ctx?.pct !== undefined && ctx.size) lines.push(m.usageContext(Math.round(ctx.pct), tokens(ctx.used ?? (ctx.pct / 100) * ctx.size), tokens(ctx.size)))
+  else if (ctx?.used) lines.push(m.usageContextTokens(tokens(ctx.used)))
+  if (snap?.cacheHit !== undefined) lines.push(m.statusCache(Math.round(snap.cacheHit * 100)))
+  if (snap?.totalIn !== undefined || snap?.totalOut !== undefined) lines.push(m.usageTokens(tokens(snap.totalIn ?? 0), tokens(snap.totalOut ?? 0)))
+  if (snap?.durationMs) lines.push(m.usageDuration(formatDuration(snap.durationMs), snap.linesAdded ?? 0, snap.linesRemoved ?? 0))
+  if (snap?.fastMode !== undefined || snap?.thinking !== undefined) lines.push(m.statusFlags(!!snap.fastMode, !!snap.thinking))
+  lines.push(m.statusWhere(snap?.cwd ?? st?.cwd ?? unknown, snap?.version ?? unknown))
+  if (!snap) lines.push(m.usageNoSnapshot)
+  if (owner) {
+    const plan = planSummary()
+    if (plan) lines.push('', m.usagePlan, `- ${plan}`)
+  }
+  if (snap) lines.push(m.statusUpdated(Math.floor(snap.at / 1000)))
+  if (t?.pending) lines.push('', m.statusQueued(`${t.pending.kind} ${t.pending.value}`.trim()))
+  if (note) lines.push('', note)
+
+  const id = (what: string) => `status:${what}:${sessionId}`
+  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(id('refresh')).setLabel(m.statusRefresh).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
+  )
+  const components: ActionRowBuilder<any>[] = []
+  if (owner && t?.live) {
+    const select = (what: string, placeholder: string, options: { label: string; value: string }[]) =>
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+        new StringSelectMenuBuilder().setCustomId(id(what)).setPlaceholder(clip(placeholder, 150)).addOptions(options),
+      )
+    components.push(
+      select('model', m.statusPickModel(snap?.model ?? unknown), MODEL_ALIASES.map(a => ({ label: a, value: a }))),
+      select('effort', m.statusPickEffort(snap?.effort ?? unknown), EFFORTS.map(e => ({ label: e, value: e }))),
+      select('mode', m.statusPickMode(mode ?? unknown), MODES.map(v => ({ label: MODE_LABELS[v], value: v }))),
+    )
+    buttons.addComponents(
+      new ButtonBuilder().setCustomId(id('compact')).setLabel(m.statusCompact).setEmoji('🗜️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`handoff:make:${sessionId}`).setLabel(m.makeHandoff).setEmoji('📋').setStyle(ButtonStyle.Secondary),
+    )
+  }
+  components.push(buttons)
+  return { content: clip(lines.join('\n'), 2000), components, allowedMentions: { parse: [] as const } }
+}
+
+/** /status: only the asker sees it; the owner gets the controls. */
+async function showStatus(i: import('discord.js').ChatInputCommandInteraction) {
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === i.channelId)
+  if (!entry) return void (await i.reply({ content: m.notSessionChannel, ephemeral: true }))
+  if (!isOwner(i.user.id) && !can(i.user.id, entry[1], 'view')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+  await i.deferReply({ ephemeral: true })
+  await i.editReply(await statusPanel(entry[0], i.user.id))
+}
+
+/** Run one panel change and report it on the panel. */
+async function applyChange(t: Tracked, kind: PendingChange['kind'], value: string, panel: PendingChange['panel']) {
+  const r = captureReplier()
+  const channelId = t.st.channelId
+  if (kind === 'model') await setModel(r, channelId, value)
+  else if (kind === 'effort' && isEffort(value)) await setEffort(r, channelId, value)
+  else if (kind === 'compact') await compactSession(r, channelId)
+  await panel.editReply(await statusPanel(t.sessionId, panel.user.id, r.text)).catch(() => {})
+}
+
+/** Called from tick: apply a queued panel change once Claude is idle. */
+function applyPending(t: Tracked) {
+  const p = t.pending
+  if (!p || t.live?.status !== 'idle') return
+  t.pending = undefined
+  void applyChange(t, p.kind, p.value, p.panel).catch(e => log('status change failed:', e?.message ?? e))
+}
+
+async function handleStatusInteraction(i: import('discord.js').ButtonInteraction | import('discord.js').StringSelectMenuInteraction) {
+  const [, what, sessionId] = i.customId.split(':')
+  const t = tracked.get(sessionId)
+  const st = state.sessions[sessionId]
+  if (what === 'refresh') {
+    if (!isOwner(i.user.id) && !can(i.user.id, st, 'view')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+    await i.deferUpdate()
+    await i.editReply(await statusPanel(sessionId, i.user.id))
+    return
+  }
+  if (!can(i.user.id, st, 'owner')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+  await i.deferUpdate()
+  if (!t?.live) return void (await i.editReply(await statusPanel(sessionId, i.user.id)))
+  const value = i.isStringSelectMenu() ? i.values[0] : ''
+  if (what === 'mode') {
+    // Shift+Tab works while Claude is busy too.
+    if (!isMode(value)) return
+    await i.editReply(await statusPanel(sessionId, i.user.id, m.statusApplying))
+    const r = captureReplier()
+    await setMode(r, t.st.channelId, value)
+    await i.editReply(await statusPanel(sessionId, i.user.id, r.text))
+    return
+  }
+  if (what !== 'model' && what !== 'effort' && what !== 'compact') return
+  if (t.live.status === 'busy') {
+    t.pending = { kind: what, value, panel: i }
+    await i.editReply(await statusPanel(sessionId, i.user.id))
+    return
+  }
+  await i.editReply(await statusPanel(sessionId, i.user.id, m.statusApplying))
+  await applyChange(t, what, value, i)
 }
 
 // ---- /rename -------------------------------------------------------------------
@@ -3146,6 +3375,8 @@ if (await daemonRunning()) {
   log(`another daemon is already running (${SOCKET_PATH}); exiting`)
   process.exit(0)
 }
+
+if (fixSystemdKillMode()) log('added KillMode=process to the systemd unit, so restarting the daemon keeps Discord-started sessions running')
 
 client.login(cfg.token).catch(e => {
   log('login failed:', e.message)

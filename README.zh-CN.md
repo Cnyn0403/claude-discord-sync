@@ -48,8 +48,8 @@ Discord 上的文字支持英文、繁体中文和简体中文，用配置里的
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | 同步、对话、选择题、计划、权限、控制台、归档 | ✅ | ✅ | ✅ |
-| `/stop`、`/end`、`/model`、`/rename`（把按键发送到 session） | tmux 或 `TIOCSTI` | tmux 或通过系统自带 Perl 的 `TIOCSTI` | 把按键发送到 session 的控制台（**实验性**） |
-| `/mode`（需要读取 session 的画面） | 仅限 tmux | 仅限 tmux | session 的控制台（**实验性**） |
+| `/stop`、`/end`、`/model`、`/rename`、`/compact`（把按键发送到 session） | tmux 或 `TIOCSTI` | tmux 或通过系统自带 Perl 的 `TIOCSTI` | 把按键发送到 session 的控制台（**实验性**） |
+| `/mode`、`/effort`（需要读取 session 的画面） | 仅限 tmux | 仅限 tmux | session 的控制台（**实验性**） |
 | `/new`、`/resume` | tmux | tmux | 打开一个新的控制台窗口（**实验性**） |
 | 开机自动启动 daemon（由 `setup` 设置） | systemd 用户服务 | launchd agent | 启动文件夹 |
 
@@ -128,9 +128,11 @@ token 会依次从 `DISCORD_BOT_TOKEN` 环境变量、`~/.claude/channels/discor
 | `/sync off`／`/sync on` | session 频道，或在其他地方对所有 session | 暂停／恢复同步（见[暂停同步](#暂停同步)） |
 | `/mode <模式>` | session 频道 | 切换权限模式（default、accept edits、plan、auto、bypass permissions），做法是不断按 Shift+Tab，直到 session 底部显示该模式。session 必须在 tmux 里（`/new` 开的都是）或者是 Windows 控制台窗口 |
 | `/model <名称>` | session 频道 | 切换模型（`opus`、`sonnet`、`haiku`、`fable`、`default` 或模型 ID）。做法是在 session 里输入 `/model`，所以 Claude 必须处于空闲状态。和在本机输入一样，也会成为新 session 的默认模型 |
+| `/effort <等级>` | session 频道 | 设置努力程度（`low`、`medium`、`high`、`xhigh`、`max`），只影响这个 session。做法是操作 Claude Code 的 `/effort` 菜单，所以 Claude 必须处于空闲状态，而且要能读取 session 的画面（同 `/mode`） |
+| `/status` | session 频道 | 只有你能看到。显示 session 的模型、努力程度、权限模式、上下文、prompt 缓存命中率、文件夹和 Claude Code 版本。所有者看到的同时也是控制面板：可以用菜单切换模型、努力程度和权限模式，也有 `/compact` 和交接的按钮。Claude 工作时做的更改，会等它停下来再应用 |
 | `yes abcde` / `no abcde` | session 频道 | 用代码回答权限请求 |
 
-`!new`、`!stop`、`!end`、`!resume`、`!sync`、`!mode`、`!model`、`!rename`、`!handoff` 也可以直接作为普通消息发送，例如 `!sync off`。`/usage`、`/share`、`/unshare`、`/members` 只能用斜杠命令。
+`!new`、`!stop`、`!end`、`!resume`、`!sync`、`!mode`、`!model`、`!effort`、`!rename`、`!handoff` 也可以直接作为普通消息发送，例如 `!sync off`。`/status`、`/usage`、`/share`、`/unshare`、`/members` 只能用斜杠命令。
 
 ## 分享
 
@@ -138,10 +140,10 @@ session 频道默认是私密的，只有 bot 和 `allowFrom` 里的所有者能
 
 | | 所有者 | 完整 | 协作 | 查看 |
 |---|---|---|---|---|
-| 看到频道和对话、`/members`、`/usage` | ✅ | ✅ | ✅ | ✅ |
+| 看到频道和对话、`/members`、`/usage`、`/status` | ✅ | ✅ | ✅ | ✅ |
 | 和 Claude 对话、回答选择题、`/stop`、`/rename`、`/handoff` | ✅ | ✅ | ✅ | |
 | 批准权限请求和计划 | ✅ | ✅ | | |
-| `/end`、`/new`、`/resume`、`/share`、`/unshare`、`/sync`、`/mode`、`/model`、控制台 | ✅ | | | |
+| `/end`、`/new`、`/resume`、`/share`、`/unshare`、`/sync`、`/mode`、`/model`、`/effort`、`/status` 的控制项、控制台 | ✅ | | | |
 
 协作者发给 Claude 的消息会标明他们的身份。能和 Claude 对话的人就能让它在你的电脑上做事，请只分享给你信任的人。分享设置在 `/resume` 之后和归档期间都仍然有效。
 

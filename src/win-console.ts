@@ -100,6 +100,8 @@ function records(keys: Key[]): Buffer {
     if (k === 'Escape') press(0x1b, 0x1b, 0x01)
     else if (k === 'Enter') press(0x0d, 0x0d, 0x1c)
     else if (k === 'Down') press(0x28, 0, 0x50, 0x0100) // ENHANCED_KEY: the arrow key, not numpad 2
+    else if (k === 'Left') press(0x25, 0, 0x4b, 0x0100)
+    else if (k === 'Right') press(0x27, 0, 0x4d, 0x0100)
     else if (k === 'BackTab') press(0x09, 0x09, 0x0f, 0x0010) // SHIFT_PRESSED
     else for (const ch of k.text) press(0, ch.charCodeAt(0))
   }
