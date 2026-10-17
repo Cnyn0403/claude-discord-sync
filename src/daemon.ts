@@ -41,15 +41,16 @@ import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { homedir, hostname } from 'os'
-import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, readdirSync, openSync, readSync, closeSync } from 'fs'
-import { basename, dirname, join, resolve } from 'path'
-import { loadConfig, readConfigFile, STATE_DIR, SOCKET_PATH, HOST_ID, otherClaim } from './config'
+import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, lstatSync, readdirSync, openSync, readSync, closeSync } from 'fs'
+import { basename, dirname, join, relative, resolve, isAbsolute } from 'path'
+import { loadConfig, readConfigFile, CLAUDE_DIR, PROJECTS_DIR, STATE_DIR, SOCKET_PATH, HOST_ID, otherClaim } from './config'
 import { scanSessions, findTranscript, isAlive, JsonlTail, type LiveSession } from './sessions'
 import { renderRecord, titleOf, toolLabel, pack, chunk, type Block, type RenderContext, type Post } from './render'
 import { send as ipcSend, onLines, type ClientMsg, type AskQuestion } from './ipc'
 import { m, SLASH_DESCRIPTIONS } from './i18n'
 import { meetingHtml, type HtmlLabels } from './meeting-html'
 import { readSnapshot, tokens, type PlanLimit } from './usage'
+import { STATUS_DIR } from './statusline'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
 import { daemonRunning, fixSystemdKillMode } from './autostart'
@@ -898,6 +899,10 @@ client.on('interactionCreate', async (i: Interaction) => {
     await runCommand(r, i.channelId, i.commandName as Command, i.options.getString('dir') ?? undefined, i.options.getString('prompt') ?? undefined)
     return
   }
+  if (i.isButton() && i.customId.startsWith('delete:')) {
+    await handleDeleteButton(i).catch(e => log('delete failed:', e?.message ?? e))
+    return
+  }
   if ((i.isButton() || i.isStringSelectMenu()) && i.customId.startsWith('status:')) {
     await handleStatusInteraction(i).catch(e => log('status panel failed:', e?.message ?? e))
     return
@@ -1635,6 +1640,7 @@ const SLASH_COMMANDS = [
     described(o.setName('name'), 'renameName').setRequired(true).setMaxLength(90),
   ),
   described(new SlashCommandBuilder().setName('status'), 'status'),
+  described(new SlashCommandBuilder().setName('delete'), 'delete'),
   described(new SlashCommandBuilder().setName('effort'), 'effort').addStringOption(o =>
     described(o.setName('level'), 'effortLevel')
       .setRequired(true)
@@ -1869,6 +1875,127 @@ async function cleanupEnded() {
     stateDirty = true
     log(`deleted channel for ${sid} (ended ${new Date(st.endedAt).toISOString()})`)
   }
+}
+
+// ---- /delete: an ended session's channel, and optionally its conversation -----------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Whether `p` lies strictly inside `dir`. */
+function inside(dir: string, p: string): boolean {
+  const rel = relative(resolve(dir), resolve(p))
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/** Bytes in a file or folder (symlinks counted, not followed). */
+function sizeOf(p: string): number {
+  const st = lstatSync(p, { throwIfNoEntry: false })
+  if (!st) return 0
+  if (!st.isDirectory()) return st.size
+  return readdirSync(p).reduce((n, e) => n + sizeOf(join(p, e)), 0)
+}
+
+function bytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`
+  return `${n} B`
+}
+
+/**
+ * What this computer keeps for a session, all named by its ID: Claude Code's
+ * transcript and the folder beside it (subagents, tool results), its file
+ * history and session env, and our status snapshot, handoffs and meeting
+ * records. Claude Code has no command to delete one session (`claude rm` is for
+ * background sessions, `claude purge` takes a whole project), so these are
+ * removed directly; the shared prompt history is left alone.
+ */
+function sessionFiles(sid: string, st: SessionState): string[] {
+  if (!UUID_RE.test(sid)) return []
+  const transcript = st.transcript ?? findTranscript(sid, st.cwd)
+  const candidates = [
+    ...(transcript && basename(transcript) === `${sid}.jsonl` && inside(PROJECTS_DIR, transcript)
+      ? [transcript, join(dirname(transcript), sid)]
+      : []),
+    join(CLAUDE_DIR, 'file-history', sid),
+    join(CLAUDE_DIR, 'session-env', sid),
+    join(STATUS_DIR, `${sid}.json`),
+    join(HANDOFFS_DIR, sid),
+    join(MEETINGS_DIR, sid),
+  ]
+  return candidates.filter(p => (inside(CLAUDE_DIR, p) || inside(STATE_DIR, p)) && lstatSync(p, { throwIfNoEntry: false }))
+}
+
+/** Still running here, or about to be tracked: nothing may be deleted. */
+const sessionRunning = (sid: string) => !!tracked.get(sid)?.live || creating.has(sid) || scanSessions().some(s => s.sessionId === sid)
+
+const tilde = (p: string) => (p.startsWith(homedir()) ? `~${p.slice(homedir().length)}` : p)
+
+/** /delete: owner only, ended sessions only; asks what to delete. */
+async function askDelete(i: import('discord.js').ChatInputCommandInteraction) {
+  if (!isOwner(i.user.id)) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+  const entry = Object.entries(state.sessions).find(([, st]) => st.channelId === i.channelId)
+  if (!entry) return void (await i.reply({ content: m.notSessionChannel, ephemeral: true }))
+  const [sid, st] = entry
+  if (sessionRunning(sid)) return void (await i.reply({ content: m.deleteLive, ephemeral: true }))
+  await i.reply({
+    content: m.deleteAsk(channelName(sid, st)),
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`delete:channel:${sid}`).setLabel(m.deleteChannelOnly).setEmoji('💬').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`delete:all:${sid}`).setLabel(m.deleteEverything).setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`delete:cancel:${sid}`).setLabel(m.deleteCancel).setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+    ephemeral: true,
+    allowedMentions: { parse: [] },
+  })
+}
+
+async function handleDeleteButton(i: ButtonInteraction) {
+  const [, action, sid] = i.customId.split(':')
+  if (!isOwner(i.user.id)) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))
+  if (action === 'cancel') return void (await i.update({ content: m.deleteCancelled, components: [] }))
+  const st = state.sessions[sid]
+  if (!st) return void (await i.update({ content: m.sessionNotFound, components: [] }))
+  if (sessionRunning(sid)) return void (await i.update({ content: m.deleteLive, components: [] }))
+  const name = channelName(sid, st)
+  if (action === 'all') {
+    // Second step: show exactly what goes.
+    const files = sessionFiles(sid, st)
+    const list = files.map(p => `- \`${tilde(p)}\` (${bytes(sizeOf(p))})`).join('\n')
+    await i.update({
+      content: clip(files.length ? m.deleteConfirmAsk(name, list, bytes(files.reduce((n, p) => n + sizeOf(p), 0))) : m.deleteNoFiles(name), 2000),
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`delete:confirm:${sid}`).setLabel(m.deleteConfirm).setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`delete:cancel:${sid}`).setLabel(m.deleteCancel).setStyle(ButtonStyle.Secondary),
+        ),
+      ],
+      allowedMentions: { parse: [] },
+    })
+    return
+  }
+  if (action !== 'channel' && action !== 'confirm') return
+  await i.update({ content: m.deleting, components: [] })
+  let removed = 0
+  let size = 0
+  if (action === 'confirm') {
+    for (const p of sessionFiles(sid, st)) {
+      const n = sizeOf(p)
+      try {
+        rmSync(p, { recursive: true, force: true })
+        removed++
+        size += n
+      } catch (e: any) {
+        log(`delete ${p} failed:`, e?.message ?? e)
+      }
+    }
+  }
+  delete state.sessions[sid]
+  stateDirty = true
+  const ch = await guild.channels.fetch(st.channelId).catch(() => null)
+  await ch?.delete('discord-sync: /delete').catch(e => log(`delete #${ch.name} failed:`, e?.message))
+  log(`deleted session ${sid} (${action === 'confirm' ? `channel and ${removed} files, ${bytes(size)}` : 'channel only'})`)
 }
 
 // ---- sharing: per-session members and private channels ----------------------
@@ -2649,11 +2776,12 @@ async function checkForUpdate() {
 
 // ---- /share, /unshare, /members, /sync -------------------------------------------
 
-const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'effort', 'mode', 'rename', 'handoff', 'usage', 'status'] as const
+const SESSION_COMMANDS = ['share', 'unshare', 'members', 'sync', 'model', 'effort', 'mode', 'rename', 'handoff', 'usage', 'status', 'delete'] as const
 
 async function handleSessionCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const st = sessionByChannel(i.channelId)
   if (i.commandName === 'status') return showStatus(i)
+  if (i.commandName === 'delete') return askDelete(i)
   if (i.commandName === 'usage') {
     // Only the asker sees it; plan usage is the owner's account, so others only get the session's numbers.
     if (!isOwner(i.user.id) && !can(i.user.id, st, 'view')) return void (await i.reply({ content: m.notAuthorized, ephemeral: true }))

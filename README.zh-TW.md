@@ -130,9 +130,10 @@ token 會依序從 `DISCORD_BOT_TOKEN` 環境變數、`~/.claude/channels/discor
 | `/model <名稱>` | session 頻道 | 切換模型（`opus`、`sonnet`、`haiku`、`fable`、`default` 或模型 ID）。做法是在 session 裡輸入 `/model`，所以 Claude 必須是閒置狀態。跟在本機輸入一樣，也會變成新 session 的預設模型 |
 | `/effort <等級>` | session 頻道 | 設定努力程度（`low`、`medium`、`high`、`xhigh`、`max`），只影響這個 session。做法是操作 Claude Code 的 `/effort` 選單，所以 Claude 必須是閒置狀態，而且要能讀取 session 的畫面（同 `/mode`） |
 | `/status` | session 頻道 | 只有你看得到。顯示 session 的模型、努力程度、權限模式、上下文、prompt 快取命中率、資料夾和 Claude Code 版本。擁有者看到的同時也是控制面板：可以用選單切換模型、努力程度和權限模式，也有 `/compact` 和交接的按鈕。Claude 工作中做的變更，會等它停下來再套用 |
+| `/delete` | 已結束 session 的頻道 | 只有擁有者能用。刪除這個 session：可以只刪 Discord 頻道（對話紀錄仍留在電腦上，`claude --resume` 還能打開），或連同 Claude Code 的 transcript 和相關檔案一起刪，這時會先列出要刪的檔案，再確認一次。執行中的 session 會被拒絕，要先 `/end` |
 | `yes abcde` / `no abcde` | session 頻道 | 用代碼回答權限請求 |
 
-`!new`、`!stop`、`!end`、`!resume`、`!sync`、`!mode`、`!model`、`!effort`、`!rename`、`!handoff` 也可以直接打成一般訊息，例如 `!sync off`。`/status`、`/usage`、`/share`、`/unshare`、`/members` 只能用斜線指令。
+`!new`、`!stop`、`!end`、`!resume`、`!sync`、`!mode`、`!model`、`!effort`、`!rename`、`!handoff` 也可以直接打成一般訊息，例如 `!sync off`。`/status`、`/usage`、`/delete`、`/share`、`/unshare`、`/members` 只能用斜線指令。
 
 ## 分享
 
@@ -143,7 +144,7 @@ session 頻道預設是私人的，只有 bot 和 `allowFrom` 裡的擁有者看
 | 看到頻道和對話、`/members`、`/usage`、`/status` | ✅ | ✅ | ✅ | ✅ |
 | 對 Claude 說話、回答選擇題、`/stop`、`/rename`、`/handoff` | ✅ | ✅ | ✅ | |
 | 核准權限請求和計畫 | ✅ | ✅ | | |
-| `/end`、`/new`、`/resume`、`/share`、`/unshare`、`/sync`、`/mode`、`/model`、`/effort`、`/status` 的控制項、控制台 | ✅ | | | |
+| `/end`、`/new`、`/resume`、`/delete`、`/share`、`/unshare`、`/sync`、`/mode`、`/model`、`/effort`、`/status` 的控制項、控制台 | ✅ | | | |
 
 協作者傳給 Claude 的訊息會標註他們的身分。能對 Claude 說話的人就能叫它在你的電腦上做事，請只分享給你信任的人。分享設定在 `/resume` 之後和封存期間都仍然有效。
 
