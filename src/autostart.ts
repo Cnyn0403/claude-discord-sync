@@ -9,7 +9,7 @@ import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { connect } from 'net'
 import { SOCKET_PATH, STATE_DIR } from './config'
-import { IS_MAC, IS_WIN } from './platform'
+import { IS_LINUX, IS_MAC, IS_WIN } from './platform'
 import { selfCommand } from './self'
 
 const NAME = 'claude-discord-sync'
@@ -58,6 +58,29 @@ function stopWindowsDaemons() {
 }
 
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/**
+ * Linux: whether systemd keeps this user's services running while they're not
+ * logged in. Without lingering, logging out of the last session (an SSH
+ * connection, say) stops the daemon and every session it started, until the
+ * next login. Undefined when it can't be told (no systemd, other platforms).
+ */
+export function lingerEnabled(): boolean | undefined {
+  if (!IS_LINUX) return undefined
+  try {
+    return sh('loginctl', ['show-user', String(process.getuid!()), '-p', 'Linger', '--value']).trim() === 'yes'
+  } catch {
+    return undefined
+  }
+}
+
+/** Turn lingering on for this user; works without sudo where polkit allows it. Returns whether it is on now. */
+export function enableLinger(): boolean {
+  try {
+    sh('loginctl', ['enable-linger', '--no-ask-password'])
+  } catch {}
+  return lingerEnabled() === true
+}
 
 /** Install (or refresh) the login item and (re)start the daemon through it. */
 export function installAutostart(): void {

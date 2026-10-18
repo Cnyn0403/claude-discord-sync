@@ -51,7 +51,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 | `/stop`, `/end`, `/model`, `/rename`, `/compact` (typed into the session) | tmux, or `TIOCSTI` | tmux, or `TIOCSTI` via the system Perl | types into the session's console (**experimental**) |
 | `/mode`, `/effort` (reads the session's screen) | tmux only | tmux only | the session's console (**experimental**) |
 | `/new`, `/resume` | tmux | tmux | opens a new console window (**experimental**) |
-| Daemon at login (set up by `setup`) | systemd user unit | launchd agent | Startup folder |
+| Daemon at login (set up by `setup`) | systemd user unit, with lingering so it keeps running after you log out (`setup` turns it on, or tells you to run `sudo loginctl enable-linger $USER`) | launchd agent | Startup folder |
 
 Linux is the tested platform. macOS and Windows support is new; please [open an issue](https://github.com/Cnyn0403/claude-discord-sync/issues) if something doesn't work. On every platform, `/stop` falls back to stopping Claude before its next tool call when keys can't be typed.
 

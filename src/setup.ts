@@ -5,10 +5,11 @@
  * answers are offered as defaults and nothing is overwritten without asking.
  */
 import { mkdirSync, writeFileSync, chmodSync } from 'fs'
+import { userInfo } from 'os'
 import { CONFIG_FILE, ENV_FILE, STATE_DIR, findToken, readConfigFile, otherClaim } from './config'
 import { IS_WIN, hasTmux } from './platform'
 import { installShortcut, shortcutOnPath, addToUserPath, SHORTCUT, SHORTCUT_DIR } from './shortcut'
-import { installAutostart, autostartInstalled, daemonRunning, logHint } from './autostart'
+import { installAutostart, autostartInstalled, daemonRunning, logHint, lingerEnabled, enableLinger } from './autostart'
 import { ask, confirm as confirmYN, askHidden } from './prompt'
 import { pickLanguage } from './i18n'
 
@@ -53,6 +54,8 @@ const text = {
     alreadyRunning: '⚠️  A daemon is already running (probably started by hand). Stop it, then press Enter.',
     askAutostart: 'Start the daemon now and at every login?',
     autostartOk: (log: string) => `✓ Daemon running. Log: ${log}`,
+    lingerOn: '✓ Turned on lingering, so the daemon keeps running after you log out',
+    lingerHint: (user: string) => `⚠️  The daemon stops when you log out of this computer (SSH included). To keep it running, run once:\n  sudo loginctl enable-linger ${user}`,
     autostartFailed: (err: string) => `✗ Couldn't set up autostart: ${err}\n  You can run it by hand: claude-discord-sync daemon`,
     manualStart: 'Run the daemon yourself with: claude-discord-sync daemon',
     saved: (f: string) => `✓ Saved ${f}`,
@@ -104,6 +107,8 @@ const text = {
     alreadyRunning: '⚠️  已經有一個 daemon 在執行（可能是手動啟動的）。請先停掉它，再按 Enter。',
     askAutostart: '要現在啟動 daemon，並在每次登入時自動啟動嗎？',
     autostartOk: (log: string) => `✓ daemon 已啟動，log：${log}`,
+    lingerOn: '✓ 已開啟 lingering，登出後 daemon 也會繼續執行',
+    lingerHint: (user: string) => `⚠️  登出這台電腦（包括 SSH）後 daemon 會停止。要讓它一直執行，請執行一次：\n  sudo loginctl enable-linger ${user}`,
     autostartFailed: (err: string) => `✗ 沒辦法設定自動啟動：${err}\n  可以手動執行：claude-discord-sync daemon`,
     manualStart: '請自己執行 daemon：claude-discord-sync daemon',
     saved: (f: string) => `✓ 已儲存 ${f}`,
@@ -155,6 +160,8 @@ const text = {
     alreadyRunning: '⚠️  已经有一个 daemon 在运行（可能是手动启动的）。请先停掉它，再按 Enter。',
     askAutostart: '要现在启动 daemon，并在每次登录时自动启动吗？',
     autostartOk: (log: string) => `✓ daemon 已启动，日志：${log}`,
+    lingerOn: '✓ 已开启 lingering，登出后 daemon 也会继续运行',
+    lingerHint: (user: string) => `⚠️  登出这台电脑（包括 SSH）后 daemon 会停止。要让它一直运行，请运行一次：\n  sudo loginctl enable-linger ${user}`,
     autostartFailed: (err: string) => `✗ 无法设置自动启动：${err}\n  可以手动运行：claude-discord-sync daemon`,
     manualStart: '请自己运行 daemon：claude-discord-sync daemon',
     saved: (f: string) => `✓ 已保存 ${f}`,
@@ -300,6 +307,7 @@ async function main() {
     try {
       installAutostart()
       console.log(t.autostartOk(logHint()))
+      if (lingerEnabled() === false) console.log(enableLinger() ? t.lingerOn : t.lingerHint(userInfo().username))
     } catch (e: any) {
       console.log(t.autostartFailed(String(e?.stderr || e?.message || e).trim()))
     }

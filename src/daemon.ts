@@ -40,7 +40,7 @@ import {
 import { createServer, type Socket } from 'net'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { homedir, hostname } from 'os'
+import { homedir, hostname, userInfo } from 'os'
 import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, mkdirSync, chmodSync, statSync, lstatSync, readdirSync, openSync, readSync, closeSync } from 'fs'
 import { basename, dirname, join, relative, resolve, isAbsolute } from 'path'
 import { loadConfig, readConfigFile, CLAUDE_DIR, PROJECTS_DIR, STATE_DIR, SOCKET_PATH, HOST_ID, CLAIM_RE, otherClaim } from './config'
@@ -53,7 +53,7 @@ import { readSnapshot, tokens, type PlanLimit } from './usage'
 import { STATUS_DIR } from './statusline'
 import { IS_WIN, IS_LINUX, hasTmux, parentPid } from './platform'
 import { COMPILED, selfCommand } from './self'
-import { daemonRunning, fixSystemdKillMode } from './autostart'
+import { daemonRunning, fixSystemdKillMode, autostartInstalled, lingerEnabled } from './autostart'
 import { latestRelease, isNewer } from './release'
 import { VERSION } from './version'
 import { keysToTmux, type Key } from './keys'
@@ -3535,6 +3535,8 @@ if (await daemonRunning()) {
   process.exit(0)
 }
 
+if (autostartInstalled() && lingerEnabled() === false)
+  log(`warning: lingering is off, so systemd stops this daemon and its sessions when you log out; run \`sudo loginctl enable-linger ${userInfo().username}\``)
 if (fixSystemdKillMode()) log('added KillMode=process to the systemd unit, so restarting the daemon keeps Discord-started sessions running')
 
 client.login(cfg.token).catch(e => {

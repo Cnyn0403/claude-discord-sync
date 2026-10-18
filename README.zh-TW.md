@@ -51,7 +51,7 @@ Discord 上的文字支援英文、繁體中文和簡體中文，用設定裡的
 | `/stop`、`/end`、`/model`、`/rename`、`/compact`（把按鍵送進 session） | tmux 或 `TIOCSTI` | tmux 或透過系統內建 Perl 的 `TIOCSTI` | 把按鍵送進 session 的主控台（**實驗性**） |
 | `/mode`、`/effort`（需要讀取 session 的畫面） | 只限 tmux | 只限 tmux | session 的主控台（**實驗性**） |
 | `/new`、`/resume` | tmux | tmux | 開一個新的主控台視窗（**實驗性**） |
-| 開機自動啟動 daemon（由 `setup` 設定） | systemd 使用者服務 | launchd agent | 啟動資料夾 |
+| 開機自動啟動 daemon（由 `setup` 設定） | systemd 使用者服務，並開啟 lingering，登出後也會繼續執行（`setup` 會自動開啟，不行時會請你執行 `sudo loginctl enable-linger $USER`） | launchd agent | 啟動資料夾 |
 
 Linux 是測試過的平台，macOS 和 Windows 是新加入的支援，遇到問題請[開 issue](https://github.com/Cnyn0403/claude-discord-sync/issues)。不論哪個平台，按鍵送不出去時，`/stop` 都會改成在 Claude 下一次使用工具前停止。
 
