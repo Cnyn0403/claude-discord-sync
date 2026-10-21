@@ -57,6 +57,7 @@ import { daemonRunning, fixSystemdKillMode } from './autostart'
 import { latestRelease, isNewer } from './release'
 import { VERSION } from './version'
 import { keysToTmux, type Key } from './keys'
+import { discordify } from './markdown'
 
 const cfg = loadConfig()
 /** Experimental: several computers share this bot and guild; this one's name. */
@@ -1109,7 +1110,7 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
   }
   const key = Math.random().toString(36).slice(2, 10)
   const who = audience(t.st, 'approve')
-  const full = `${m.planPending}\n${plan}`
+  const full = `${m.planPending}\n${discordify(plan)}`
   // Long plans: preview in the message, full text attached.
   const long = full.length > 1800
   const p: PendingPlan = { sock, channelId: ch.id, content: long ? chunk(full, 1700)[0] + '\n' + m.planAttached : full }

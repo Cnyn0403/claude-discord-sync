@@ -24,7 +24,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 
 ## Features
 
-- **One channel per session.** Every running Claude Code session gets a channel, named `project・title` once Claude Code has titled the session (or after `/rename`); your prompts, Claude's replies and one-line tool summaries are mirrored live. Long replies are posted as a preview plus a `.md` attachment.
+- **One channel per session.** Every running Claude Code session gets a channel, named `project・title` once Claude Code has titled the session (or after `/rename`); your prompts, Claude's replies and one-line tool summaries are mirrored live. Markdown Discord can't show is rewritten: tables become lists, `####` and deeper headings become bold lines, horizontal rules are dropped (code blocks stay as they are). Long replies are posted as a preview plus a `.md` attachment.
 - **Two-way chat** for sessions started with `ccd` (a wrapper around `claude`). Messages and attachments you post in the channel go to Claude.
 - **Questions and plans as components.** `AskUserQuestion` becomes select menus (with a free-text "other" option); `ExitPlanMode` becomes *Approve / Revise / Answer in terminal* buttons.
 - **Permission prompts** get *Allow / Deny* buttons and an @-mention.

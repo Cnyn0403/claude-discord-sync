@@ -24,7 +24,7 @@ Discord 上的文字支持英文、繁体中文和简体中文，用配置里的
 
 ## 功能
 
-- **每个 session 一个频道。** 每个运行中的 Claude Code session 都有自己的频道，Claude Code 为 session 生成标题后（或用 `/rename` 命名后），频道会改名为 `项目・标题`；你的输入、Claude 的回复和工具调用摘要都会实时同步。太长的回复只发预览，全文作为 `.md` 附件。
+- **每个 session 一个频道。** 每个运行中的 Claude Code session 都有自己的频道，Claude Code 为 session 生成标题后（或用 `/rename` 命名后），频道会改名为 `项目・标题`；你的输入、Claude 的回复和工具调用摘要都会实时同步。Discord 显示不了的 Markdown 会先转换：表格改成列表，`####` 以下的标题改成粗体行，分隔线去掉（代码块不动）。太长的回复只发预览，全文作为 `.md` 附件。
 - **双向对话：** 用 `ccd`（`claude` 的包装命令）启动的 session，在频道里发的消息和附件都会转给 Claude。
 - **选择题和计划变成按钮：** `AskUserQuestion` 会变成下拉菜单，可以选“其他”自己输入；`ExitPlanMode` 会变成“批准 / 继续修改 / 改在终端回答”按钮。
 - **权限请求**会附带“允许 / 拒绝”按钮并 @ 你。
