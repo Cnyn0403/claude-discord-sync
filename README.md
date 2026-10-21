@@ -30,7 +30,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 - **Permission prompts** get *Allow / Deny* buttons and an @-mention.
 - **Done notifications.** You're @-mentioned when Claude finishes a turn that took a while.
 - **Session control:** `/new`, `/stop`, `/end`, `/resume` (or `!new`, `!stop`, …). New and resumed sessions run in a detached tmux session you can `tmux attach` to locally.
-- **Console channel** listing every session with its status, plus menus to stop / end / resume and a button to start a new one.
+- **Console channel** listing every session with its status, plus menus to stop / end / resume and a button to start a new one. Pausing everything, stopping and ending ask for confirmation first.
 - **Archive.** Ended sessions keep their channel, meeting threads included, and move to an archive category (`Claude Sessions (ended)`, then `…-2`, `…-3` as each fills its 50 channels). `/resume` moves a channel back.
 - **Cleanup.** Only when the server nears Discord's 500-channel limit are the channels of the sessions that ended longest ago deleted (the console says which); their transcripts and meeting records stay on your computer. A time limit is optional.
 - **Several computers, one bot.** Each computer uses its own server; see [Several computers](#several-computers-one-bot).
