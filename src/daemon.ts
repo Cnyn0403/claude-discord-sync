@@ -57,6 +57,7 @@ import { daemonRunning, fixSystemdKillMode } from './autostart'
 import { latestRelease, isNewer } from './release'
 import { VERSION } from './version'
 import { keysToTmux, type Key } from './keys'
+import { CARD_COLORS, cardEmbed, toolPreview, type Card, type CardState } from './cards'
 
 const cfg = loadConfig()
 /** Experimental: several computers share this bot and guild; this one's name. */
@@ -836,6 +837,7 @@ client.on('messageCreate', async (msg: Message) => {
     const behavior = perm[1].toLowerCase().startsWith('y') ? 'allow' : 'deny'
     const ok = t.live && answerPermission(t.live.pid, perm[2].toLowerCase(), behavior)
     void msg.react(ok ? (behavior === 'allow' ? '✅' : '❌') : '❓').catch(() => {})
+    if (ok) closePermissionCard(perm[2].toLowerCase(), behavior === 'allow' ? 'approved' : 'denied', `**${behavior === 'allow' ? m.allowed : m.denied}**（${msg.author.username}）`)
     return
   }
   // @-mentioning people (but not the bot) opens a meeting thread.
@@ -950,7 +952,18 @@ client.on('interactionCreate', async (i: Interaction) => {
     return
   }
   const label = behavior === 'allow' ? m.allowed : behavior === 'deny' ? m.denied : m.answerInTerminal
-  await i.update({ content: `${i.message.content}\n\n**${label}**（${i.user.username}）`, components: [] }).catch(() => {})
+  const status = `**${label}**（${i.user.username}）`
+  const card = permCards.get(request_id)
+  permCards.delete(request_id)
+  const cardState: CardState = behavior === 'allow' ? 'approved' : behavior === 'deny' ? 'denied' : 'closed'
+  // A card from before a daemon restart: recolour the embed it has.
+  const old = i.message.embeds[0]
+  const embed = card
+    ? cardEmbed(card.card, cardState, status)
+    : old && EmbedBuilder.from(old).setColor(CARD_COLORS[cardState]).setFooter(null).setDescription(`${old.description ?? ''}\n\n${status}`.slice(0, 4096))
+  await i
+    .update(embed ? { content: '', embeds: [embed], components: [] } : { content: `${i.message.content}\n\n${status}`, components: [] })
+    .catch(() => {})
 })
 
 // ---- AskUserQuestion on Discord --------------------------------------------
@@ -3244,24 +3257,47 @@ async function postPermission(
 ) {
   const ch = await channelOf(t)
   if (!ch) return undefined
-  let preview = req.input_preview
+  // The input arrives as JSON, possibly cut short; then it's shown as it is.
+  let input: Record<string, unknown> | undefined
   try {
-    preview = JSON.stringify(JSON.parse(preview), null, 2)
+    input = JSON.parse(req.input_preview)
   } catch {}
-  const body = chunk(
-    [m.permissionNeeded(req.tool_name), req.description, '```json\n' + preview.slice(0, 1200) + '\n```', m.permissionReplyHint(req.request_id)]
+  const card: Card = {
+    title: m.permissionNeeded(req.tool_name),
+    body: [
+      req.description ? `*${req.description}*` : '',
+      input ? toolPreview(req.tool_name, input) : '```json\n' + req.input_preview.slice(0, 1200).replace(/```/g, 'ˋˋˋ') + '\n```',
+    ]
       .filter(Boolean)
       .join('\n'),
-  )[0]
+    footer: m.permissionReplyHint(req.request_id),
+  }
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`perm:allow:${pid}:${req.request_id}`).setLabel(m.allow).setEmoji('✅').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`perm:deny:${pid}:${req.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
     ...(local ? [new ButtonBuilder().setCustomId(`perm:local:${pid}:${req.request_id}`).setLabel(m.answerInTerminal).setEmoji('💻').setStyle(ButtonStyle.Secondary)] : []),
   )
   const who = audience(t.st, 'approve')
-  return await enqueue(ch.id, () => ch.send({ content: `${mentionsOf(who)}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: who } })).catch(
-    () => undefined,
-  )
+  const sent = await enqueue(ch.id, () =>
+    ch.send({ content: mentionsOf(who), embeds: [cardEmbed(card, 'pending')], components: [row], allowedMentions: { users: who } }),
+  ).catch(() => undefined)
+  if (sent) {
+    permCards.set(req.request_id, { card, message: sent })
+    // Prompts answered in the terminal are never removed: keep only the latest.
+    if (permCards.size > 100) permCards.delete(permCards.keys().next().value!)
+  }
+  return sent
+}
+
+/** Permission prompts on Discord by request ID, to redraw them once answered. */
+const permCards = new Map<string, { card: Card; message: Message }>()
+
+/** Show a permission prompt as answered: its colour, who answered, no buttons. */
+function closePermissionCard(request_id: string, state: CardState, status: string) {
+  const c = permCards.get(request_id)
+  if (!c) return
+  permCards.delete(request_id)
+  void c.message.edit({ content: '', embeds: [cardEmbed(c.card, state, status)], components: [] }).catch(() => {})
 }
 
 /** Hand a permission answer to whoever asked: a PermissionRequest hook (hook input) or the channel server. */
@@ -3301,7 +3337,7 @@ function settleHookPermissions(sessionId: string) {
     if (p.sessionId !== sessionId) continue
     hookPermissions.delete(id)
     ipcSend(p.sock, { t: 'perm_result' })
-    void p.message?.edit({ content: `${p.message.content}\n\n**${m.answerInTerminal}**`, components: [] }).catch(() => {})
+    closePermissionCard(id, 'closed', `**${m.answerInTerminal}**`)
   }
 }
 

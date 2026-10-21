@@ -38,6 +38,9 @@ const en = {
   // permissions
   permissionNeeded: (tool: string) => `🔐 **Permission needed: ${tool}**`,
   permissionReplyHint: (id: string) => `-# You can also reply \`yes ${id}\` / \`no ${id}\``,
+  moreLines: (n: number) => `… (${n} lines)`,
+  replaceAll: 'every occurrence',
+  moreEdits: (n: number) => `… ${n} edits in all`,
   allow: 'Allow',
   deny: 'Deny',
   allowed: '✅ Allowed',
@@ -316,6 +319,9 @@ const zhTW: Messages = {
 
   permissionNeeded: tool => `🔐 **需要權限：${tool}**`,
   permissionReplyHint: id => `-# 也可以回覆 \`yes ${id}\` / \`no ${id}\``,
+  moreLines: n => `…（共 ${n} 行）`,
+  replaceAll: '取代所有出現的地方',
+  moreEdits: n => `…共 ${n} 處修改`,
   allow: '允許',
   deny: '拒絕',
   allowed: '✅ 已允許',
@@ -575,6 +581,9 @@ const zhCN: Messages = {
 
   permissionNeeded: tool => `🔐 **需要权限：${tool}**`,
   permissionReplyHint: id => `-# 也可以回复 \`yes ${id}\` / \`no ${id}\``,
+  moreLines: n => `…（共 ${n} 行）`,
+  replaceAll: '替换所有出现的地方',
+  moreEdits: n => `…共 ${n} 处修改`,
   allow: '允许',
   deny: '拒绝',
   allowed: '✅ 已允许',
