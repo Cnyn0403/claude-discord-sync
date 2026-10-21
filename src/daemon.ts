@@ -210,6 +210,11 @@ type Tracked = {
   dialogCheckAt?: number
   /** A /status panel change asked for while Claude worked, applied once it's idle. */
   pending?: PendingChange
+  /** The latest tool call read from the transcript (toolKey), and when, for catchUp. */
+  lastToolUse?: string
+  lastToolUseAt?: number
+  /** The transcript's posts, one after another; settles once the latest is sent. */
+  posting?: Promise<void>
 }
 const tracked = new Map<string, Tracked>()
 const creating = new Set<string>()
@@ -413,7 +418,7 @@ async function startTracking(s: LiveSession) {
 }
 
 async function endTracking(t: Tracked) {
-  pump(t)
+  await pump(t).catch(() => {})
   // Nobody can hand an open meeting to an ended session; keep its record.
   await closeMeeting(t, { handoff: false })
   await refreshStatus(t, false).catch(() => {})
@@ -539,7 +544,8 @@ async function onChannelGone(id: string) {
 client.on('channelDelete', ch => void onChannelGone(ch.id).catch(e => log('channelDelete failed:', e?.message ?? e)))
 client.on('threadDelete', th => void onChannelGone(th.id).catch(e => log('threadDelete failed:', e?.message ?? e)))
 
-function pump(t: Tracked) {
+/** Post what the transcript has gained; the promise settles once it's sent. */
+async function pump(t: Tracked): Promise<void> {
   if (!t.tail) {
     const p = findTranscript(t.sessionId, t.st.cwd)
     if (!p) return
@@ -565,14 +571,56 @@ function pump(t: Tracked) {
     return
   }
   noteLastPrompt(t, blocks)
-  if (blocks.length) void post(t, pack(blocks, cfg.attachOver))
+  if (!blocks.length) return
+  // catchUp pumps too, while an earlier post may still be going out: keep them in order.
+  const posts = pack(blocks, cfg.attachOver)
+  await (t.posting = (t.posting ?? Promise.resolve()).then(() => post(t, posts)).catch(() => {}))
+}
+
+/**
+ * A tool call's identity for matching the hook's copy to the transcript's: key
+ * order and defaulted fields (`replace_all: false`) differ between the two.
+ */
+function toolKey(name: string, input: unknown): string {
+  const obj = (input ?? {}) as Record<string, unknown>
+  const fields = Object.keys(obj)
+    .filter(k => obj[k] !== false && obj[k] !== null && obj[k] !== undefined)
+    .sort()
+    .map(k => [k, obj[k]])
+  return `${name}\0${JSON.stringify(fields)}`
+}
+/** How long a prompt may wait for the transcript to show the tool call it's about. */
+const CATCH_UP_MS = 3000
+
+/**
+ * Before a prompt about a tool call: wait until the transcript has that call and
+ * post what came before it (Claude's "I'll now …"), so the prompt comes after it,
+ * as in the terminal. Claude Code writes the transcript a moment after it asks.
+ */
+async function catchUp(t: Tracked, tool: string, input?: unknown) {
+  // Without the input (questions and plans reach us reshaped), the tool's name has to do.
+  // An identical call read well before this request was an earlier one.
+  const since = Date.now() - CATCH_UP_MS
+  const seen = () =>
+    (t.lastToolUseAt ?? 0) >= since &&
+    (input === undefined ? !!t.lastToolUse?.startsWith(`${tool}\0`) : t.lastToolUse === toolKey(tool, input))
+  const deadline = Date.now() + CATCH_UP_MS
+  while (!seen() && Date.now() < deadline) {
+    await pump(t).catch(() => {})
+    if (!seen()) await Bun.sleep(200)
+  }
+  await t.posting
 }
 
 /** Follow the main thread's tool calls: a tool_use starts one, its result (or new text) ends it. */
 function trackActivity(t: Tracked, o: any) {
   if (o?.isSidechain || !Array.isArray(o?.message?.content)) return
   for (const item of o.message.content) {
-    if (o.type === 'assistant' && item?.type === 'tool_use') t.activity = { label: toolLabel(item.name, item.input), since: Date.now() }
+    if (o.type === 'assistant' && item?.type === 'tool_use') {
+      t.activity = { label: toolLabel(item.name, item.input), since: Date.now() }
+      t.lastToolUse = toolKey(item.name, item.input)
+      t.lastToolUseAt = Date.now()
+    }
     else if ((o.type === 'assistant' && item?.type === 'text') || (o.type === 'user' && item?.type === 'tool_result')) t.activity = undefined
   }
 }
@@ -666,13 +714,20 @@ function notifyWhenDone(t: Tracked) {
   // A pending question already pinged them.
   if ([...asks.values(), ...plans.values()].some(a => a.channelId === t.st.channelId)) return
   const who = audience(t.st, 'chat')
-  void channelOf(t).then(ch => {
+  // Claude Code can say "idle" a moment before the turn's last reply reaches the
+  // transcript: wait, post that reply, then the notification under it.
+  setTimeout(async () => {
+    await pump(t).catch(() => {})
+    // Things may have moved on in the meantime: paused, working again, or asking something.
+    if (isPaused(t.st) || t.live?.status !== 'idle' || t.busySince !== undefined) return
+    if ([...asks.values(), ...plans.values()].some(a => a.channelId === t.st.channelId)) return
+    const ch = await channelOf(t)
     if (!ch) return
-    void enqueue(ch.id, () =>
-      ch.send({ content: `${mentionsOf(who)} ${m.done(formatDuration(elapsed))}`, allowedMentions: { users: who } }),
-    )
-  })
+    void enqueue(ch.id, () => ch.send({ content: `${mentionsOf(who)} ${m.done(formatDuration(elapsed))}`, allowedMentions: { users: who } }))
+  }, DONE_AFTER_MS)
 }
+
+const DONE_AFTER_MS = 2000
 
 let ticking = false
 async function tick() {
@@ -701,7 +756,7 @@ async function tick() {
         await endTracking(t).catch(e => log('end failed:', e?.message ?? e))
         continue
       }
-      pump(t)
+      void pump(t).catch(e => log('pump failed:', e?.message ?? e))
       void syncChannel(t.sessionId, t.st)
       warnContext(t)
       notifyWhenDone(t)
@@ -1021,6 +1076,9 @@ async function startAsk(sock: Socket, sessionId: string, questions: AskQuestion[
     if (a.messageId)
       void ch.messages.edit(a.messageId, { content: askContent(a, m.timedOut), components: [] }).catch(() => {})
   })
+  await catchUp(t, 'AskUserQuestion')
+  // The hook went away meanwhile.
+  if (asks.get(key) !== a) return
   const who = audience(t.st, 'chat')
   const sent = await enqueue(ch.id, () =>
     ch.send({
@@ -1124,6 +1182,8 @@ async function startPlan(sock: Socket, sessionId: string, plan: string) {
     new ButtonBuilder().setCustomId(`plan:revise:${key}`).setLabel(m.revise).setEmoji('✏️').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`plan:term:${key}`).setLabel(m.answerInTerminal).setEmoji('⌨️').setStyle(ButtonStyle.Secondary),
   )
+  await catchUp(t, 'ExitPlanMode')
+  if (plans.get(key) !== p) return
   const sent = await enqueue(ch.id, () =>
     ch.send({
       content: `${mentionsOf(who)}\n${p.content}`.slice(0, 2000),
@@ -3245,8 +3305,11 @@ async function postPermission(
   const ch = await channelOf(t)
   if (!ch) return undefined
   let preview = req.input_preview
+  // The preview may be cut short; then only the tool's name can match the transcript.
+  let input: unknown
   try {
-    preview = JSON.stringify(JSON.parse(preview), null, 2)
+    input = JSON.parse(preview)
+    preview = JSON.stringify(input, null, 2)
   } catch {}
   const body = chunk(
     [m.permissionNeeded(req.tool_name), req.description, '```json\n' + preview.slice(0, 1200) + '\n```', m.permissionReplyHint(req.request_id)]
@@ -3258,6 +3321,9 @@ async function postPermission(
     new ButtonBuilder().setCustomId(`perm:deny:${pid}:${req.request_id}`).setLabel(m.deny).setEmoji('❌').setStyle(ButtonStyle.Danger),
     ...(local ? [new ButtonBuilder().setCustomId(`perm:local:${pid}:${req.request_id}`).setLabel(m.answerInTerminal).setEmoji('💻').setStyle(ButtonStyle.Secondary)] : []),
   )
+  await catchUp(t, req.tool_name, input)
+  // A hook that went away meanwhile has nothing left to answer.
+  if (local && !hookPermissions.has(req.request_id)) return undefined
   const who = audience(t.st, 'approve')
   return await enqueue(ch.id, () => ch.send({ content: `${mentionsOf(who)}\n${body}`.slice(0, 2000), components: [row], allowedMentions: { users: who } })).catch(
     () => undefined,
