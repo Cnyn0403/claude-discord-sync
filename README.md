@@ -27,7 +27,7 @@ The Discord-facing text is available in English, Traditional Chinese and Simplif
 - **One channel per session.** Every running Claude Code session gets a channel, named `project・title` once Claude Code has titled the session (or after `/rename`); your prompts, Claude's replies and one-line tool summaries are mirrored live. Markdown Discord can't show is rewritten: tables become lists, `####` and deeper headings become bold lines, horizontal rules are dropped (code blocks stay as they are). Long replies are posted as a preview plus a `.md` attachment.
 - **Two-way chat** for sessions started with `ccd` (a wrapper around `claude`). Messages and attachments you post in the channel go to Claude.
 - **Questions and plans as components.** `AskUserQuestion` becomes select menus (with a free-text "other" option); `ExitPlanMode` becomes *Approve / Revise / Answer in terminal* buttons.
-- **Permission prompts** get *Allow / Deny* buttons and an @-mention.
+- **Permission prompts** get *Allow / Deny* buttons and an @-mention, on a card that shows what the tool will do (the command, the file's content, a diff of the edit, the URL, an MCP tool's arguments) and whose colour says where it stands: yellow waiting, green allowed, red denied, grey answered in the terminal.
 - **Done notifications.** You're @-mentioned when Claude finishes a turn that took a while.
 - **Session control:** `/new`, `/stop`, `/end`, `/resume` (or `!new`, `!stop`, …). New and resumed sessions run in a detached tmux session you can `tmux attach` to locally.
 - **Console channel** listing every session with its status, plus menus to stop / end / resume and a button to start a new one. Pausing everything, stopping and ending ask for confirmation first.
