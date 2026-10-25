@@ -1811,6 +1811,21 @@ async function updateConsole() {
   consoleRendered = rendered
 }
 
+/** An only-you-can-see question with a red button that does `action` and a grey one that doesn't. */
+async function askConsoleConfirm(i: ButtonInteraction | StringSelectMenuInteraction, action: string, question: string, yes: string) {
+  await i.reply({
+    content: question,
+    components: [
+      new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`console:yes:${action}`).setLabel(yes).setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('console:cancel').setLabel(m.consoleCancel).setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+    ephemeral: true,
+    allowedMentions: { parse: [] },
+  })
+}
+
 async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction) {
   if (!isOwner(i.user.id)) {
     await i.reply({ content: m.notAuthorized, ephemeral: true })
@@ -1832,11 +1847,36 @@ async function handleConsoleInteraction(i: ButtonInteraction | StringSelectMenuI
     )
     return
   }
+  // Pausing everything, interrupting and ending sit one stray tap away on a phone: ask first.
+  if (i.isButton() && i.customId === 'console:pauseall') return void (await askConsoleConfirm(i, 'pauseall', m.confirmPauseAll, m.yesPauseAll))
+  if (i.isStringSelectMenu() && (i.customId === 'console:stop' || i.customId === 'console:end')) {
+    consoleRendered = '' // Reset the menu's selection on the next tick.
+    const st = state.sessions[i.values[0]]
+    if (!st) return void (await i.reply({ content: m.sessionNotFound, ephemeral: true }))
+    const stop = i.customId === 'console:stop'
+    await askConsoleConfirm(i, `${stop ? 'stop' : 'end'}:${i.values[0]}`, stop ? m.confirmStop(st.channelId) : m.confirmEnd(st.channelId), stop ? m.yesStop : m.yesEnd)
+    return
+  }
+  if (i.isButton() && i.customId === 'console:cancel') return void (await i.update({ content: m.consoleCancelled, components: [] }))
+  if (i.isButton() && i.customId.startsWith('console:yes:')) {
+    // The confirmation becomes the result.
+    await i.update({ components: [] })
+    const r = interactionReplier(i, true)
+    const [what, sid] = i.customId.slice('console:yes:'.length).split(':')
+    if (what === 'pauseall') {
+      await setAllPaused(true, i.user.username)
+      return void (await r.reply(m.allPaused))
+    }
+    const st = state.sessions[sid]
+    if (!st) return void (await r.reply(m.sessionNotFound))
+    await runCommand(r, st.channelId, what as Command)
+    return
+  }
   await i.deferReply({ ephemeral: true })
   const r = interactionReplier(i, true)
-  if (i.isButton() && (i.customId === 'console:pauseall' || i.customId === 'console:resumeall')) {
-    await setAllPaused(i.customId === 'console:pauseall', i.user.username)
-    await r.reply(state.pausedAll ? m.allPaused : m.allResumed)
+  if (i.isButton() && i.customId === 'console:resumeall') {
+    await setAllPaused(false, i.user.username)
+    await r.reply(m.allResumed)
     return
   }
   if (i.isStringSelectMenu() && i.customId === 'console:pause') {

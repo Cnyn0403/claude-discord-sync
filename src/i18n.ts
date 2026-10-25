@@ -208,6 +208,17 @@ const en = {
   pauseMenu: '⏯️ Pause / resume one session…',
   pauseAll: 'Pause all',
   resumeAll: 'Resume all',
+  // console actions a stray tap could set off ask first
+  confirmPauseAll:
+    '⏸️ Pause sync for **every** session?\n-# Until you resume: nothing they do is posted (and it is not caught up later), permission prompts stay in the terminal, and messages sent here are refused. Claude keeps working.',
+  confirmStop: (channelId: string) => `⏹️ Interrupt the work in <#${channelId}>?\n-# Same as Esc in the terminal; the session stays open.`,
+  confirmEnd: (channelId: string) =>
+    `👋 End <#${channelId}>?\n-# Work in progress is interrupted first, then \`/exit\` is typed. It can be resumed later.`,
+  yesPauseAll: 'Pause all',
+  yesStop: 'Interrupt',
+  yesEnd: 'End it',
+  consoleCancel: 'Cancel',
+  consoleCancelled: 'Cancelled, nothing changed.',
 
   // meetings
   meetingStarted: (bot: string) =>
@@ -475,6 +486,15 @@ const zhTW: Messages = {
   pauseMenu: '⏯️ 暫停／恢復某個 session 的同步…',
   pauseAll: '全部暫停',
   resumeAll: '全部恢復',
+  confirmPauseAll:
+    '⏸️ 要暫停**所有** session 的同步嗎？\n-# 恢復之前：它們的輸出都不會貼過來（之後也不補貼），權限請求只出現在終端機，在這裡發的訊息會被拒絕。Claude 照常工作。',
+  confirmStop: channelId => `⏹️ 要中斷 <#${channelId}> 正在做的事嗎？\n-# 等同在終端機按 Esc，session 不會關掉。`,
+  confirmEnd: channelId => `👋 要結束 <#${channelId}> 嗎？\n-# 正在工作的話會先中斷，再輸入 \`/exit\`。之後可以恢復。`,
+  yesPauseAll: '全部暫停',
+  yesStop: '中斷',
+  yesEnd: '結束',
+  consoleCancel: '取消',
+  consoleCancelled: '已取消，什麼都沒改。',
 
   meetingStarted: bot =>
     `🗣️ **會議討論串**：在這裡討論，結束前不會影響 session。所有內容都會被記錄，結束後會整理成一個 HTML 檔。\n` +
@@ -734,6 +754,15 @@ const zhCN: Messages = {
   pauseMenu: '⏯️ 暂停／恢复某个 session 的同步…',
   pauseAll: '全部暂停',
   resumeAll: '全部恢复',
+  confirmPauseAll:
+    '⏸️ 要暂停**所有** session 的同步吗？\n-# 恢复之前：它们的输出都不会发过来（之后也不补发），权限请求只出现在终端，在这里发的消息会被拒绝。Claude 照常工作。',
+  confirmStop: channelId => `⏹️ 要中断 <#${channelId}> 正在做的事吗？\n-# 等同在终端按 Esc，session 不会关掉。`,
+  confirmEnd: channelId => `👋 要结束 <#${channelId}> 吗？\n-# 正在工作的话会先中断，再输入 \`/exit\`。之后可以恢复。`,
+  yesPauseAll: '全部暂停',
+  yesStop: '中断',
+  yesEnd: '结束',
+  consoleCancel: '取消',
+  consoleCancelled: '已取消，什么都没改。',
 
   meetingStarted: bot =>
     `🗣️ **会议子区**：在这里讨论，结束前不会影响 session。所有内容都会被记录，结束后会整理成一个 HTML 文件。\n` +
