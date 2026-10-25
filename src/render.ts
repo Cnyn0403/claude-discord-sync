@@ -6,6 +6,7 @@
 
 /** `plain` is the unformatted text of a user message, used to label sessions. */
 import { m } from './i18n'
+import { discordify } from './markdown'
 
 export type Block = { kind: 'user' | 'assistant' | 'tool' | 'question' | 'info'; text: string; plain?: string }
 
@@ -70,7 +71,7 @@ function summarizeTool(name: string, input: any, ctx: RenderContext): Block | un
   }
   if (name === 'ExitPlanMode' && typeof input?.plan === 'string') {
     if (ctx.askOnDiscord) return undefined
-    return { kind: 'question', text: `${m.planPending}\n${input.plan}` }
+    return { kind: 'question', text: `${m.planPending}\n${discordify(input.plan)}` }
   }
   // Our own tools post their own output.
   if (name.startsWith('mcp__discord-sync__')) return undefined
@@ -151,7 +152,7 @@ export function renderRecord(o: any, ctx: RenderContext): Block[] {
     const out: Block[] = []
     for (const item of msg.content) {
       if (item?.type === 'text' && item.text?.trim()) {
-        out.push({ kind: 'assistant', text: item.text.trim() })
+        out.push({ kind: 'assistant', text: discordify(item.text.trim()) })
       } else if (item?.type === 'tool_use') {
         ctx.toolNames.set(item.id, item.name)
         const b = summarizeTool(item.name, item.input, ctx)
